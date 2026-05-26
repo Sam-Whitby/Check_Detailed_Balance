@@ -168,11 +168,17 @@ $torusD2[s1_, s2_, nGrid_] :=
    SECTION 4 — Interaction shells   (memoised)
    ================================================================ *)
 
-(* All sites within squared distance $maxD2 of site s on nGrid torus *)
+(* All sites within squared distance $maxD2 of site s on nGrid torus.
+   Finite $maxD2: iterate over displacements in [-rMax,rMax]² — O(maxD2) candidates.
+   Infinite $maxD2: fall back to full site scan (only used on small checker lattices). *)
 $neighborsD2[s_, nGrid_] := $neighborsD2[s, nGrid] =
-  Select[Range[nGrid^2],
-    Function[q, With[{d2 = $torusD2[s, q, nGrid]},
-      d2 > 0 && d2 <= $maxD2]]]
+  If[TrueQ[$maxD2 === Infinity],
+    Select[Range[nGrid^2], # =!= s &],
+    Module[{rMax = Ceiling[Sqrt[$maxD2]]},
+      DeleteDuplicates @ Select[
+        Flatten @ Table[$applyDir[s, {dr, dc}, nGrid],
+                        {dr, -rMax, rMax}, {dc, -rMax, rMax}],
+        Function[q, q =!= s && $torusD2[s, q, nGrid] <= $maxD2]]]]
 
 (* All unique undirected bonds {s1, s2, d2} with s1<s2, d2≤$maxD2 *)
 $uniqueBondsExt[nGrid_] := $uniqueBondsExt[nGrid] =
@@ -194,13 +200,16 @@ $uniqueBondsExt[nGrid_] := $uniqueBondsExt[nGrid] =
    During symbolic check: couplingJ has no DownValues → free atoms.
    During numerical MCMC: activated via Block in check.wls. *)
 energy[state_List] :=
-  With[{nGrid = Round[Sqrt[Length[state]]]},
-    Total @ Map[
-      Function[bond,
-        With[{t1 = state[[bond[[1]]]], t2 = state[[bond[[2]]]], d2 = bond[[3]]},
-          If[t1 != 0 && t2 != 0,
-             couplingJ[Min[t1, t2], Max[t1, t2], d2], 0]]],
-      $uniqueBondsExt[nGrid]]]
+  Module[{nGrid = Round[Sqrt[Length[state]]], occ},
+    occ = Flatten[Position[state, _?(# > 0 &)]];
+    Total @ Flatten @ Table[
+      With[{d2 = $torusD2[occ[[i]], occ[[j]], nGrid]},
+        If[d2 <= $maxD2,
+           couplingJ[Min[state[[occ[[i]]]], state[[occ[[j]]]]],
+                     Max[state[[occ[[i]]]], state[[occ[[j]]]]],
+                     d2],
+           0]],
+      {i, Length[occ]}, {j, i+1, Length[occ]}]]
 
 
 (* ================================================================
@@ -369,11 +378,14 @@ DynamicSymParams[states_List] :=
   Module[{types, nGrid, d2Vals, couplingAtoms},
     types  = Sort[DeleteCases[Union @@ states, 0]];
     nGrid  = Round[Sqrt[Length[states[[1]]]]];
-    (* Achievable squared distances on this torus ($maxD2=Infinity → all pairs) *)
-    d2Vals = Sort @ DeleteDuplicates @ Select[
-      Flatten @ Table[$torusD2[s1, s2, nGrid],
-                      {s1, nGrid^2}, {s2, nGrid^2}],
-      # > 0 &];
+    (* Achievable squared distances — enumerate over displacement vectors;
+       O(nGrid²/4) instead of O(nGrid⁴) all-pairs scan. *)
+    d2Vals = Module[{halfN = Floor[nGrid/2]},
+      Sort @ DeleteDuplicates @ Select[
+        Flatten @ Table[
+          Min[dr, nGrid-dr]^2 + Min[dc, nGrid-dc]^2,
+          {dr, 0, halfN}, {dc, 0, halfN}],
+        0 < # <= $maxD2 &]];
     couplingAtoms = Flatten @ Table[
       If[a <= b, Table[couplingJ[a, b, d2], {d2, d2Vals}], Nothing],
       {a, types}, {b, types}];

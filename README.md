@@ -45,18 +45,24 @@ The ergodicity result appears as a column in the output table (`PASS (k)` or `FA
 **Energy:** Abstract `couplingJ[type1, type2, d2]` summed over all site pairs within squared grid distance ≤ `$maxD2`. During the symbolic check, `couplingJ` has no DownValues — each `(a,b,d2)` triple is a free real atom, proving detailed balance for all coupling functions simultaneously. A concrete Lennard-Jones implementation activates for numerical MCMC runs.
 
 **Physical parameters:**
-- `physLen` — particle diameter in lattice units; `sigLJ = physLen` sets the LJ zero-crossing. Default `physLen=1` is appropriate for checker lattices (3×3 etc.); increase for production runs (e.g. `physLen=5`).
+- `physLen` — particle diameter in lattice units; `sigLJ = physLen` sets the LJ zero-crossing at `d²=physLen²`. Default `physLen=1` is appropriate for checker lattices (3×3 etc.); increase for production runs (e.g. `physLen=2` on a 20×20 grid).
 - `sigStep = physLen * sqrt(2/(β·ε))` — BD step size at the natural LJ timescale.
-- `$maxD2 = Infinity` — include all pairs during the symbolic check; override to `Ceiling[2*physLen^2]` for large-scale numerical runs.
+- `$maxD2` — interaction cutoff in squared lattice units. **Must be strictly greater than `physLen²`** (the LJ zero-crossing) to include any attractive interactions. The LJ minimum is at `d²=2^(1/3)·physLen²`; the standard cutoff that captures the full well is `Ceiling[2*physLen^2]`. Setting `$maxD2 ≤ physLen²` excludes all attraction and energy converges to zero. Default `$maxD2=Infinity` is correct for the symbolic checker (small lattices have finitely many pairs anyway); override for large-lattice animation runs.
 
 **VMMC acceptance:** Rigid cluster translation — intra-cluster distances are preserved, so ΔE_intra=0 and no post-cluster Metropolis step is needed. Superdetailed balance is satisfied by the Whitelam-Geissler link-probability mechanism.
 
 **Abstract-parameter convention:** `$checkerAbstractParams = {"physLen", "epsLJ", "sigStep"}` (string names). The checker saves the concrete values, clears the symbols before BFS (so the symbolic proof holds for all parameter values simultaneously), then restores them inside a `Block` for the numerical MCMC run.
 
+**Performance:** All core operations scale with particle count and interaction cutoff, not grid size. `$neighborsD2` iterates over displacement vectors in `[-⌈√maxD2⌉, ⌈√maxD2⌉]²` (O(maxD2) candidates per site) rather than scanning all `nGrid²` sites. `energy` sums over occupied pairs (O(N²)) rather than all bonds in `$uniqueBondsExt`. `DynamicSymParams` enumerates minimum-image displacements (O(nGrid²/4)) rather than all site pairs (O(nGrid⁴)). A 20×20 grid with N=10 and `$maxD2=8` runs at the same per-step cost as a 4×4 grid.
+
 ```bash
 # Check vmmc_continuous.wl (Gaussian proposal, 3×3 seed, symbolic + numerical)
 wolframscript -file check.wls examples3/vmmc_continuous.wl \
   SeedBitStrings=11110101011110011 Mode=Both
+
+# Animate vmmc_continuous.wl on a 20×20 grid (physLen=2, $maxD2=8 captures full LJ well)
+wolframscript -file animate.wls examples3/vmmc_continuous.wl \
+  Sites=400 N=10 Steps=2000 Beta=1 FPS=8 Simple=1 NoParams=1 physLen=2 '$maxD2=8'
 ```
 
 ## Symbolic checkers
@@ -143,6 +149,10 @@ wolframscript -file animate.wls <algorithm.wl> Sites=<n> N=<n> [options]
 | `RecordEvery=N` | `1` | Record state every N steps |
 | `Jpair<a><b>=f` | random | Coupling constant, e.g. `Jpair12=-1.0` |
 | `NoParams=1` | off | Hide the right-hand parameter panel (faster rendering on large systems) |
+| `physLen=f` | `1` | *(vmmc_continuous.wl)* Particle diameter in lattice units; sets LJ scale |
+| `$maxD2=f` | `Infinity` | *(vmmc_continuous.wl)* Interaction cutoff (squared lattice units). Must exceed `physLen²` for attractive interactions; use `Ceiling[2*physLen^2]` |
+
+Any `name=value` argument not in the table above is applied as a Mathematica assignment after the algorithm file loads, allowing algorithm-specific parameters to be set from the command line.
 
 ---
 
