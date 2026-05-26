@@ -69,11 +69,11 @@ physLen = 1
 (* LJ well depth in kT units. *)
 epsLJ = 1
 
-sigLJ = physLen      (* LJ zero-crossing = particle diameter *)
+sigLJ := physLen     (* delayed: always reflects current physLen *)
 
 (* Displacement proposal std dev: one BD timestep at the natural LJ timescale
    (m=1, γ=1).  Override sigStep directly to tune acceptance rate. *)
-sigStep = physLen * Sqrt[2.0 / (numBeta * epsLJ)]
+sigStep := physLen * Sqrt[2.0 / (numBeta * epsLJ)]   (* delayed: tracks physLen changes *)
 
 (* Interaction cutoff.
    $maxD2 = Infinity: include all pairs; correct for symbolic check (small

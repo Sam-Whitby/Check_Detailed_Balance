@@ -113,6 +113,19 @@ ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, D
          $fieldFreeParams, $couplingFreeParams];
 Get[algFile];
 
+(* ---- Apply unrecognized key-value args as Mathematica assignments ----
+   Allows CLI overrides like physLen=5 to take effect after the .wl file sets
+   its defaults.  Recognised prefixes and J-style coupling args are excluded. *)
+$knownPrefixes = {"Sites=", "N=", "Steps=", "Beta=", "FPS=", "Delay=",
+                   "Simple=", "RecordEvery=", "NoParams="};
+Scan[Function[opt,
+  With[{parts = StringSplit[opt, "=", 2]},
+    If[Length[parts] == 2 &&
+       !AnyTrue[$knownPrefixes, StringStartsQ[opt, #] &] &&
+       !StringStartsQ[opt, "J"],
+      ToExpression[parts[[1]] <> " = " <> parts[[2]]]]]],
+  kvArgs];
+
 (* ---- Activate concrete function implementations (abstract-function mode) ----
    In files where fieldF and couplingJ have no DownValues ($abstractFunctions=True),
    permanently install the concrete implementations for this animation run. *)
