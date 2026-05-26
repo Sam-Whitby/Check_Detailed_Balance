@@ -108,9 +108,22 @@ If[!FileExistsQ[algFile],
 ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, DisplayState,
          fieldF, couplingJ,
          $fieldFConcrete, $couplingJConcrete, $abstractFunctions, $concreteParams,
-         $fieldFreeParams, $couplingFreeParams];
+         $fieldFreeParams, $couplingFreeParams,
+         $checkerAbstractParams];
 Print["Loading: ", algFile];
 Get[algFile];
+
+(* ---- Clear abstract parameters declared by the algorithm file ----
+   Algorithm files may declare $checkerAbstractParams = {sym, ...} to
+   list parameters that must be unbound during symbolic BFS (e.g. sigStep,
+   physLen, epsLJ).  Clear them now so BFS treats them as free atoms. *)
+If[ListQ[$checkerAbstractParams],
+  Scan[ClearAll, $checkerAbstractParams];
+  If[AnyTrue[$checkerAbstractParams, ValueQ],
+    Print["ERROR: parameter remains bound after clearing: ",
+          Select[$checkerAbstractParams, ValueQ]];
+    Exit[1]];
+  Print["Abstract params cleared: ", $checkerAbstractParams]];
 
 (* ---- Validate required symbols ---- *)
 If[Length[DownValues[Algorithm]] == 0,

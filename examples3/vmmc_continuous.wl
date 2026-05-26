@@ -1,55 +1,44 @@
 (* ================================================================
    vmmc_continuous.wl
-   Continuous-limit VMMC on a periodic 2D torus
+   Continuous-limit VMMC on a periodic 2D torus — Gaussian proposal
    ================================================================
 
-   A generalisation of vmmc_2d_field.wl designed so that the same
-   code describes both small discrete lattice systems (checkable with
-   the detailed-balance checker) and large fine-grained systems that
-   converge to continuous off-lattice VMMC comparable to MPCD+MD.
+   Virtual Move Monte Carlo (Whitelam-Geissler) on a 2D periodic
+   lattice with a Gaussian displacement proposal.
 
-   The two control parameters for the continuous limit are:
+   Physical design:
+     physLen — particle diameter in lattice units.  Sets the LJ
+       length scale: sigLJ = physLen, LJ minimum at d²=2^(1/3)·physLen².
+       For physLen=5 this gives strong hard-core repulsion at d²=1.
 
-     numDirections K  — number of uniformly-spaced translation
-       directions over [0, 2π).  K=4 gives the four compass directions
-       (identical to vmmc_2d.wl); K=8 adds the four diagonals; larger K
-       with correspondingly larger nGrid approaches isotropic diffusion.
-       Each direction index k ∈ {0,...,K-1} has grid displacement
-           {Round[sin(2πk/K)], Round[cos(2πk/K)]}
-       Opposite directions (k and k+K/2 for even K) are exact negatives,
-       guaranteeing a symmetric proposal for any even K.
+     sigStep — displacement proposal std dev.  Default value is the
+       natural BD timestep at the LJ timescale:
+           sigStep = physLen · √(2/(numBeta·epsLJ))
+       Override sigStep directly to tune acceptance rate.
 
-     nGrid  — inferred from the state as Round[Sqrt[Length[state]]].
-       Increasing nGrid (by enlarging the BitsToState encoding or
-       initialising with more sites for physical runs) reduces the
-       lattice spacing b = L_box/nGrid.  As nGrid→∞ with fixed K, the
-       discrete walk approaches Brownian motion by the CLT.
+   Gaussian proposal:
+     (dx, dy) drawn independently from N(0, sigStep), rounded to
+     integers.  Symmetry p(dx,dy)=p(-dx,-dy) holds exactly (Gaussian
+     is even).  Zero displacement (dx=dy=0) returns the state unchanged.
 
-   Energy:
-     Abstract couplingJ[type1, type2, d2] summed over all site pairs
-     within squared grid distance d2 ≤ $maxD2.  During the symbolic
-     check, couplingJ has no DownValues — each (a,b,d2) triple is a
-     free real atom, proving detailed balance for ALL coupling functions
-     simultaneously.  A concrete Lennard-Jones-like implementation
-     activates only for numerical MCMC and animation runs.
+   Checker:
+     $checkerAbstractParams = {physLen, epsLJ, sigStep} — cleared to
+     unbound symbols before BFS so the proof is valid for all values.
+     $maxD2 = Infinity — all site pairs included (correct for small
+     lattices used by the checker).
+     couplingJ has no DownValues during symbolic check — each
+     (a,b,d2) triple is a free real atom.
+     dbc_core.wl intercepts RandomVariate[NormalDistribution[0,sigStep]]
+     and converts it to seqBernoulli over {-nMax,...,nMax} where
+     nMax=floor(nGrid/2), with symbolic Erfc weights.
 
-   VMMC acceptance:
-     Rigid cluster translation — all particles move by the same grid
-     vector dir.  Intra-cluster distances are preserved, so ΔE_intra=0
-     and no post-cluster Metropolis correction is needed.  The
-     Whitelam-Geissler link-probability mechanism exactly accounts for
-     all cluster–noncluster energy changes (superdetailed balance).
-
-   Continuous limit:
-     At large nGrid and K, the discrete grid approximates R² and the
-     K-direction proposal approximates a uniform distribution over the
-     circle.  Dynamical exponents (cluster diffusion D∝n^{-1/3},
-     Zimm scaling) and the intermediate scattering function shape can
-     be compared directly to MPCD+MD reference data to grade the
-     physical fidelity of the algorithm.
+   Numerical / animation:
+     $couplingJConcrete activates inside Block in check.wls/animate.wls.
+     Override $maxD2 = Ceiling[2*physLen^2] for physical runs.
 
    REFERENCES
      Whitelam & Geissler, J. Chem. Phys. 127, 154101 (2007) — VMMC
+     Ermak & McCammon, J. Chem. Phys. 69, 1352 (1978) — BD
    ================================================================ *)
 
 
@@ -61,50 +50,55 @@
    automatically.
    ================================================================ *)
 
-(* K = number of translation directions, uniformly spaced over [0,2π).
-   Must be even (opposite directions exist).
-   K=4  — four compass directions (checker default; exact VMMC).
-   K=8  — compass + diagonal (8 distinct directions on a square grid).
-   K=16, 32, ... — finer angular resolution as nGrid grows.
-   For the checker, K=4 or K=8 is recommended. *)
-numDirections = 4
+(* ---- Physical parameters — concrete for numerical runs ---- *)
 
-(* Step size in grid units. The physical displacement per move attempt
-   is stepSize × b where b = L_box/nGrid.
-   stepSize=1 — standard nearest-neighbour hop (checker default).
-   Larger stepSize gives more distinct rounded directions for large K. *)
-stepSize = 1
+(* Particle diameter in lattice units.  Sets the LJ length scale:
+     sigLJ = physLen   (LJ zero-crossing = one particle diameter)
+     LJ minimum at d² = 2^(1/3)·physLen²
+   For physLen=5: nearest-neighbour energy ≈ 4·epsLJ·(5^12−5^6)·10^9,
+   strongly repulsive, enforcing a soft hard-core at one diameter. *)
+physLen = 5
 
-(* Interaction cutoff: include all bonds with squared grid distance ≤ $maxD2.
-   $maxD2=1 — nearest-neighbour only (fast symbolic check).
-   $maxD2=2 — nearest + diagonal neighbours (more physical).
-   $maxD2=4 — up to 2 grid units; approaches 1/r cutoff as nGrid→∞. *)
-$maxD2 = 2
+(* LJ well depth in kT units. *)
+epsLJ = 1
 
-(* Abstract-functions flag.  couplingJ has NO DownValues during the
-   symbolic check; each call couplingJ[a,b,d2] is a free real atom.
-   Do NOT set this to False — it is required for the symbolic check. *)
+sigLJ = physLen      (* LJ zero-crossing = particle diameter *)
+
+(* Displacement proposal std dev: one BD timestep at the natural LJ timescale
+   (m=1, γ=1).  Override sigStep directly to tune acceptance rate. *)
+sigStep = physLen * Sqrt[2.0 / (numBeta * epsLJ)]
+
+(* Interaction cutoff.
+   $maxD2 = Infinity: include all pairs; correct for symbolic check (small
+   lattices have finitely many pairs anyway).
+   For numerical runs with physLen=5: set $maxD2 = Ceiling[2*physLen^2] = 50. *)
+$maxD2 = Infinity
+
+(* ---- Checker interface ---- *)
+
+(* Parameters cleared to unbound symbols before BFS; concrete values above
+   are for numerical runs only. *)
+$checkerAbstractParams = {physLen, epsLJ, sigStep}
+
+(* fixedParams: declared as Reals for FullSimplify; assigned concrete values
+   (not random) during numerical MCMC.  Values are captured here before
+   $checkerAbstractParams clears these symbols for BFS.
+   sigStep formula uses numBeta and epsLJ; evaluated after numBeta=1 (line 405). *)
+symParams = <|"fixedParams" -> <|physLen -> 5, epsLJ -> 1,
+                                  sigStep -> physLen * Sqrt[2.0 / (numBeta * epsLJ)]|>|>
+
+(* ---- Abstract-functions flag ---- *)
+(* couplingJ has NO DownValues during the symbolic check; each call
+   couplingJ[a,b,d2] is a free real atom.  Do NOT set this to False. *)
 $abstractFunctions = True
 
-(* ---- CONCRETE coupling (used only in numerical MCMC / animation) ----
-   Lennard-Jones in squared-grid-unit coordinates:
-     V(d²) = 4·epsLJ·[(σ²/d²)⁶ − (σ²/d²)³]
-   LJ minimum at d² = 2^(1/3)·σ², zero crossing at d² = σ².
-   sigLJ = 2^(-1/6) ≈ 0.891 places the minimum exactly at d²=1 (NN),
-   giving well depth V_min = -epsLJ at nearest-neighbour contact.
-   Both symbols are assigned directly below so animate.wls does not
-   overwrite them with random values. *)
-epsLJ = 1            (* well depth (exact); Mathematica converts to float as needed *)
-sigLJ = 2^(-1/6)     (* exact algebraic: LJ minimum falls exactly at d²=1 *)
-
+(* ---- Concrete coupling (numerical MCMC / animation only) ---- *)
 $couplingJConcrete[a_Integer, b_Integer, d2_Integer] :=
-  If[d2 == 0 || d2 > $maxD2, 0,
+  If[d2 == 0 || d2 === Infinity || d2 > Ceiling[2 * physLen^2], 0,
      4 * epsLJ * ((sigLJ^2/d2)^6 - (sigLJ^2/d2)^3)]
 
-(* Empty: epsLJ/sigLJ are assigned above; no Jpair mechanism needed. *)
-$concreteParams = <||>
-
-$couplingFormulaStr = "4*epsLJ*((sigLJ^2/d2)^6-(sigLJ^2/d2)^3); min at d2=1, depth=epsLJ"
+$concreteParams   = <||>
+$couplingFormulaStr = "4*epsLJ*((sigLJ^2/d2)^6-(sigLJ^2/d2)^3); min at d2=2^(1/3)*physLen^2"
 
 
 (* ================================================================
@@ -167,30 +161,6 @@ $torusD2[s1_, s2_, nGrid_] :=
     With[{dr = Min[dr0, nGrid - dr0], dc = Min[dc0, nGrid - dc0]},
       dr^2 + dc^2]]
 
-
-(* ================================================================
-   SECTION 3 — K-direction set
-   ================================================================
-
-   $dirVectors[K, step] returns a list of K integer grid displacement
-   vectors, one per direction index k=0,...,K-1.  Angle θ_k = 2πk/K.
-   Grid vector: {Round[step·sin(θ_k)], Round[step·cos(θ_k)]}.
-
-   For K=4, step=1: exactly the four compass directions.
-   For K=8, step=1: compass + four diagonal directions.
-   For general even K: opposite directions (k, k+K/2) are exact
-   negatives, guaranteeing a symmetric proposal distribution.
-
-   As K and step grow (with nGrid scaled proportionally), the set of
-   distinct directions becomes denser on the circle, approaching the
-   isotropic continuous limit.  For the checker use K=4 or K=8.
-   ================================================================ *)
-
-$dirVectors[K_, step_] := $dirVectors[K, step] =
-  Table[
-    {Round[N[step * Sin[2 Pi k / K]]],
-     Round[N[step * Cos[2 Pi k / K]]]},
-    {k, 0, K - 1}]
 
 
 (* ================================================================
@@ -338,41 +308,37 @@ $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
    SECTION 8 — Algorithm
    ================================================================
 
-   One VMMC step with K-direction proposal:
+   One VMMC step with Gaussian displacement proposal:
    1. Choose seed particle uniformly from all occupied sites.
-   2. Choose direction index k ∈ {0,...,K-1} uniformly; look up grid
-      displacement from $dirVectors.  If the rounded direction is the
-      zero vector (degenerate for large K, small step), reject immediately.
+   2. Draw (dx, dy) independently from N(0, sigStep), rounded to integers.
+      If dir = {0,0}, return state (no-op move).
    3. Build cluster via Whitelam-Geissler link probabilities.
    4. Apply rigid cluster translation; reject on hard-sphere collision.
 
    No post-cluster Metropolis step is needed: the link-probability
    mechanism exactly accounts for all cluster–noncluster pair energy
-   changes via superdetailed balance (same as standard VMMC).
-   Intra-cluster distances are preserved by rigid translation, so
-   ΔE_intra = 0 identically. *)
+   changes via superdetailed balance.  Intra-cluster distances are
+   preserved by rigid translation, so ΔE_intra = 0 identically.
+
+   Symmetry: p(dx,dy) = p(−dx,−dy) holds exactly because the Gaussian
+   is even.  This is the only requirement for superdetailed balance. *)
 
 Algorithm[state_List] :=
-  Module[{
-    nGrid, occupied, seed, dirs, dirIdx, dir,
-    cluster, newState, dest
-  },
+  Module[{nGrid, occupied, seed, dx, dy, dir, cluster, newState, dest},
     nGrid    = Round[Sqrt[Length[state]]];
     occupied = Flatten[Position[state, _?(# > 0 &)]];
     If[occupied === {}, Return[state]];
 
-    seed   = RandomChoice[occupied];
-    dirs   = $dirVectors[numDirections, stepSize];
-    dirIdx = RandomInteger[{0, numDirections - 1}];
-    dir    = dirs[[dirIdx + 1]];
+    seed = RandomChoice[occupied];
 
-    (* Degenerate direction (rounding collapsed to {0,0}): reject *)
+    dx  = Round[RandomVariate[NormalDistribution[0, sigStep]]];
+    dy  = Round[RandomVariate[NormalDistribution[0, sigStep]]];
+    dir = {dx, dy};
     If[dir === {0, 0}, Return[state]];
 
     cluster = $vmmcBuildCluster[state, nGrid, seed, dir];
     If[cluster === None, Return[state]];
 
-    (* Apply rigid cluster translation: clear old positions, fill new *)
     newState = state;
     Do[newState[[cluster[[i]]]] = 0, {i, Length[cluster]}];
     Do[
@@ -380,7 +346,6 @@ Algorithm[state_List] :=
       If[newState[[dest]] =!= 0, Return[state, Module]];
       newState[[dest]] = state[[cluster[[i]]]],
       {i, Length[cluster]}];
-
     newState
   ]
 
@@ -400,20 +365,19 @@ Algorithm[state_List] :=
                      (epsLJ, sigLJ, etc.) for the numerical MCMC Block. *)
 
 DynamicSymParams[states_List] :=
-  Module[{types, nGrid, d2Vals, couplingAtoms, concreteKeys},
+  Module[{types, nGrid, d2Vals, couplingAtoms},
     types  = Sort[DeleteCases[Union @@ states, 0]];
     nGrid  = Round[Sqrt[Length[states[[1]]]]];
-    (* Achievable squared distances within $maxD2 on this torus *)
+    (* Achievable squared distances on this torus ($maxD2=Infinity → all pairs) *)
     d2Vals = Sort @ DeleteDuplicates @ Select[
       Flatten @ Table[$torusD2[s1, s2, nGrid],
                       {s1, nGrid^2}, {s2, nGrid^2}],
-      0 < # <= $maxD2 &];
+      # > 0 &];
     couplingAtoms = Flatten @ Table[
       If[a <= b, Table[couplingJ[a, b, d2], {d2, d2Vals}], Nothing],
       {a, types}, {b, types}];
-    concreteKeys = If[AssociationQ[$concreteParams], Keys[$concreteParams], {}];
     <|"couplings"     -> couplingAtoms,
-      "numericParams" -> concreteKeys|>]
+      "numericParams" -> {}|>]
 
 
 (* ================================================================

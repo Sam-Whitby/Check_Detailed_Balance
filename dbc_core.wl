@@ -35,6 +35,11 @@
 
 $dbcDir = DirectoryName[$InputFileName];
 
+(* Current lattice side length — set by BuildTreeAT before each state's BFS.
+   Used by RandomVariate[NormalDistribution[...]] to cap displacement range
+   at floor(nGrid/2), the maximum distinct displacement on the torus. *)
+$dbcCurrentNGrid = 1;
+
 (* ----------------------------------------------------------------
    $jPairSym
    Returns the canonical per-type-pair coupling symbol Jpair<lo><hi>.
@@ -486,18 +491,34 @@ RunWithBitsAT[alg_, state_, bits_List] := Module[
                 $dbc$tag]
           ]]],
 
-      (* RandomVariate: UniformDistribution[{lo,hi}] -> continuous uniform token.
-         All other distributions throw $dbc$cantHandle. *)
+      (* RandomVariate:
+           UniformDistribution[{lo,hi}] -> continuous uniform token.
+           NormalDistribution[mu, sigma] -> seqBernoulli over integer
+             displacements in [Round[mu]-nMax, Round[mu]+nMax] where
+             nMax = Floor[$dbcCurrentNGrid/2].  Weights are exact Gaussian
+             CDF differences; symbolic sigma produces symbolic Erfc weights
+             that cancel direction-by-direction in the DB check.
+           All other distributions throw $dbc$cantHandle. *)
       RandomVariate = Function[
         Module[{args = {##}},
           Which[
             MatchQ[args, {HoldPattern[UniformDistribution[{_, _}]]}],
               makeContToken[args[[1,1,1]], args[[1,1,2]]],
+            MatchQ[args, {HoldPattern[NormalDistribution[_, _]]}],
+              Module[{mu = args[[1,1]], sigma = args[[1,2]],
+                      nMax, vals, rawW},
+                nMax  = Floor[$dbcCurrentNGrid / 2];
+                vals  = Range[Round[mu] - nMax, Round[mu] + nMax];
+                rawW  = Table[
+                  CDF[NormalDistribution[mu, sigma], k + 1/2] -
+                  CDF[NormalDistribution[mu, sigma], k - 1/2],
+                  {k, vals}];
+                seqBernoulli[rawW / Total[rawW], vals]],
             True,
               Throw[$dbc$cantHandle[
                 "RandomVariate[" <> ToString[args] <>
-                "]: only UniformDistribution[{lo,hi}] is supported; " <>
-                "use RandomReal[{lo,hi}] for uniform draws"],
+                "]: only UniformDistribution[{lo,hi}] and " <>
+                "NormalDistribution[mu,sigma] are supported"],
                 $dbc$tag]]]],
 
       (* RandomPermutation: Knuth (Fisher-Yates) shuffle via the intercepted
@@ -720,6 +741,7 @@ BuildTreeAT[seedState_, alg_, OptionsPattern[]] := Module[
   While[toProcess =!= {},
     s         = First[toProcess];
     toProcess = Rest[toProcess];
+    $dbcCurrentNGrid = Round[Sqrt[Length[s]]];
     If[verbose, Print["  Tree for state: ", s]];
     queue    = {{}};
     leaves   = {};
@@ -851,8 +873,9 @@ BoltzmannWeightsAT[allStates_List, energy_, numBeta_] := Module[
      RandomReal[], Random[], RandomInteger[], RandomChoice[]
 
    Also intercepted (safe to use):
-     RandomVariate[UniformDistribution[{lo,hi}]], RandomPermutation[n/list],
-     RandomSample[list], RandomSample[list,k]
+     RandomVariate[UniformDistribution[{lo,hi}]],
+     RandomVariate[NormalDistribution[mu,sigma]],
+     RandomPermutation[n/list], RandomSample[list], RandomSample[list,k]
 
    These are NOT interceptable and will cause analysis failure:
      RandomWord, RandomPrime, RandomColor, AbsoluteTime, etc.
