@@ -16,6 +16,11 @@
            sigStep = physLen · √(2/(numBeta·epsLJ))
        Override sigStep directly to tune acceptance rate.
 
+   Default physLen=1 is appropriate for the checker lattice (3×3 etc.):
+   LJ energies are O(1) kT so Boltzmann weights are non-degenerate.
+   For production runs increase physLen (e.g. 5 for a particle spanning
+   5 lattice units); use $maxD2 = Ceiling[2*physLen^2] to limit cutoff.
+
    Gaussian proposal:
      (dx, dy) drawn independently from N(0, sigStep), rounded to
      integers.  Symmetry p(dx,dy)=p(-dx,-dy) holds exactly (Gaussian
@@ -55,9 +60,11 @@
 (* Particle diameter in lattice units.  Sets the LJ length scale:
      sigLJ = physLen   (LJ zero-crossing = one particle diameter)
      LJ minimum at d² = 2^(1/3)·physLen²
-   For physLen=5: nearest-neighbour energy ≈ 4·epsLJ·(5^12−5^6)·10^9,
-   strongly repulsive, enforcing a soft hard-core at one diameter. *)
-physLen = 5
+   physLen=1: LJ zero-crossing at the nearest-neighbour distance d²=1;
+   energies ~O(1) kT on checker lattices (3×3 etc.).  For production
+   runs on fine-grained grids, increase physLen (e.g. physLen=5 for a
+   particle spanning 5 lattice units). *)
+physLen = 1
 
 (* LJ well depth in kT units. *)
 epsLJ = 1
@@ -71,21 +78,15 @@ sigStep = physLen * Sqrt[2.0 / (numBeta * epsLJ)]
 (* Interaction cutoff.
    $maxD2 = Infinity: include all pairs; correct for symbolic check (small
    lattices have finitely many pairs anyway).
-   For numerical runs with physLen=5: set $maxD2 = Ceiling[2*physLen^2] = 50. *)
+   Override for production runs: $maxD2 = Ceiling[2*physLen^2]. *)
 $maxD2 = Infinity
 
 (* ---- Checker interface ---- *)
 
 (* Parameters cleared to unbound symbols before BFS; concrete values above
-   are for numerical runs only. *)
-$checkerAbstractParams = {physLen, epsLJ, sigStep}
-
-(* fixedParams: declared as Reals for FullSimplify; assigned concrete values
-   (not random) during numerical MCMC.  Values are captured here before
-   $checkerAbstractParams clears these symbols for BFS.
-   sigStep formula uses numBeta and epsLJ; evaluated after numBeta=1 (line 405). *)
-symParams = <|"fixedParams" -> <|physLen -> 5, epsLJ -> 1,
-                                  sigStep -> physLen * Sqrt[2.0 / (numBeta * epsLJ)]|>|>
+   are for numerical runs only.  String names prevent evaluation to concrete
+   values before check.wls can save them and clear the symbols. *)
+$checkerAbstractParams = {"physLen", "epsLJ", "sigStep"}
 
 (* ---- Abstract-functions flag ---- *)
 (* couplingJ has NO DownValues during the symbolic check; each call

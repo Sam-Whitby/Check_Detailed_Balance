@@ -114,14 +114,23 @@ Print["Loading: ", algFile];
 Get[algFile];
 
 (* ---- Clear abstract parameters declared by the algorithm file ----
-   Algorithm files may declare $checkerAbstractParams = {sym, ...} to
-   list parameters that must be unbound during symbolic BFS (e.g. sigStep,
-   physLen, epsLJ).  Clear them now so BFS treats them as free atoms. *)
-If[ListQ[$checkerAbstractParams],
+   Algorithm files declare $checkerAbstractParams = {"name1", "name2", ...}
+   (string names, which survive evaluation unlike symbol references) to list
+   parameters that must be unbound during symbolic BFS.
+   Concrete values are captured BEFORE clearing so that numerical MCMC can
+   restore them inside a Block. *)
+$abstractParamRestore = <||>;
+If[ListQ[$checkerAbstractParams] && AllTrue[$checkerAbstractParams, StringQ],
+  (* Save current numeric values before clearing *)
+  $abstractParamRestore = Association @ Flatten @ Map[
+    Function[name,
+      With[{val = Symbol[name]},
+        If[NumericQ[val], {name -> val}, {}]]],
+    $checkerAbstractParams];
   Scan[ClearAll, $checkerAbstractParams];
-  If[AnyTrue[$checkerAbstractParams, ValueQ],
-    Print["ERROR: parameter remains bound after clearing: ",
-          Select[$checkerAbstractParams, ValueQ]];
+  bound = Select[$checkerAbstractParams, ToExpression["ValueQ[" <> # <> "]"] &];
+  If[bound =!= {},
+    Print["ERROR: parameter remains bound after clearing: ", bound];
     Exit[1]];
   Print["Abstract params cleared: ", $checkerAbstractParams]];
 
@@ -363,12 +372,16 @@ Do[
             couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2]];
           $runNumericalMCMC[]],
         $runNumericalMCMC[]];
-    If[allBlockVars =!= {},
+    $restoreSyms     = Map[Symbol, Keys[$abstractParamRestore]];
+    $restoreVals     = Values[$abstractParamRestore];
+    allBlockVarsFull = Union[allBlockVars, $restoreSyms];
+    If[allBlockVarsFull =!= {},
       SeedRandom[42];
       compNumVals = If[compNumericVars =!= {}, RandomReal[{-1, 1}, Length[compNumericVars]], {}];
-      Block[Evaluate[allBlockVars],
+      Block[Evaluate[allBlockVarsFull],
         If[compNumericVars =!= {}, MapThread[Set, {compNumericVars, compNumVals}]];
         If[$fixedSymVars =!= {}, MapThread[Set, {$fixedSymVars, $fixedNumVals}]];
+        If[$restoreSyms =!= {}, MapThread[Set, {$restoreSyms, $restoreVals}]];
         $activateAndRun[]],
       $activateAndRun[]];
     simFreq = N[# / Total[mcmcCounts]] & /@ mcmcCounts;

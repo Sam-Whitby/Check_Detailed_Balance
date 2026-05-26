@@ -10,6 +10,7 @@ Symbolically proves or disproves detailed balance for Monte Carlo algorithms wri
    - `RandomInteger[{lo,hi}]` / `RandomChoice[list]` — rejection sampling over ⌈log₂(n)⌉ bits.
    - `RandomReal[]` — *interval tracking*: a latent variable U ∈ [lo,hi]; each comparison `U < p` reads one bit and narrows the interval to [lo,p] or [p,hi], with weight (p−lo)/(hi−lo) or (hi−p)/(hi−lo) respectively.
    - `RandomChoice[weights → elements]` — decomposed into n−1 sequential Bernoulli trials.
+   - `RandomVariate[NormalDistribution[μ, σ]]` — truncated to `{Round[μ]−nMax, …, Round[μ]+nMax}` (nMax = Floor[nGrid/2]) and decomposed via sequential Bernoulli with CDF-difference weights.
 
 2. **BFS over bit sequences.** Starting from a seed state, all possible bit sequences are enumerated. Each complete path gives a (start, end, weight) triple. Weights for the same (start, end) pair are summed to form the symbolic transition matrix T.
 
@@ -37,20 +38,23 @@ The ergodicity result appears as a column in the output table (`PASS (k)` or `FA
 
 ## Continuous-limit VMMC (`vmmc_continuous.wl`)
 
-`vmmc_continuous.wl` generalises `vmmc_2d_field.wl` to support K uniformly-spaced translation directions and an extended interaction cutoff $maxD2, so that the same code describes both checkable lattice systems and large fine-grained systems that converge to continuous off-lattice VMMC comparable to MPCD+MD.
+`vmmc_continuous.wl` implements VMMC with a **Gaussian displacement proposal** on a 2D periodic lattice. At large `nGrid`, the discrete Gaussian walk converges to Brownian motion, making the same algorithm code the continuous-limit reference.
 
-**Two continuous-limit control parameters:**
-- `numDirections` K — number of directions uniformly spaced over [0, 2π). K=4: compass (checker default); K=8: compass+diagonal; larger K approaches isotropic diffusion as nGrid grows.
-- `nGrid` — inferred from the state as `Round[Sqrt[Length[state]]]`. Increasing nGrid reduces lattice spacing b=L_box/nGrid; as nGrid→∞ with fixed K, the discrete walk approaches Brownian motion.
+**Gaussian proposal:** `(dx, dy)` are drawn independently from `N(0, sigStep)` and rounded to integers. The symmetry `p(dx,dy) = p(−dx,−dy)` holds exactly because the Gaussian is even, satisfying the proposal symmetry required for detailed balance. A zero displacement `(dx=dy=0)` is a no-op.
 
-**Energy:** Abstract `couplingJ[type1, type2, d2]` summed over all site pairs within squared grid distance ≤ `$maxD2`. During the symbolic check, `couplingJ` has no DownValues — each `(a,b,d2)` triple is a free real atom, proving detailed balance for all coupling functions simultaneously. A concrete Lennard-Jones-like implementation activates for numerical MCMC runs.
+**Energy:** Abstract `couplingJ[type1, type2, d2]` summed over all site pairs within squared grid distance ≤ `$maxD2`. During the symbolic check, `couplingJ` has no DownValues — each `(a,b,d2)` triple is a free real atom, proving detailed balance for all coupling functions simultaneously. A concrete Lennard-Jones implementation activates for numerical MCMC runs.
+
+**Physical parameters:**
+- `physLen` — particle diameter in lattice units; `sigLJ = physLen` sets the LJ zero-crossing. Default `physLen=1` is appropriate for checker lattices (3×3 etc.); increase for production runs (e.g. `physLen=5`).
+- `sigStep = physLen * sqrt(2/(β·ε))` — BD step size at the natural LJ timescale.
+- `$maxD2 = Infinity` — include all pairs during the symbolic check; override to `Ceiling[2*physLen^2]` for large-scale numerical runs.
 
 **VMMC acceptance:** Rigid cluster translation — intra-cluster distances are preserved, so ΔE_intra=0 and no post-cluster Metropolis step is needed. Superdetailed balance is satisfied by the Whitelam-Geissler link-probability mechanism.
 
-**Physical comparison:** At large nGrid and K, dimensionless dynamical exponents (cluster diffusion D∝n^{-ν}, MSD scaling α, intermediate scattering function shape) can be compared to MPCD+MD reference data to grade physical fidelity.
+**Abstract-parameter convention:** `$checkerAbstractParams = {"physLen", "epsLJ", "sigStep"}` (string names). The checker saves the concrete values, clears the symbols before BFS (so the symbolic proof holds for all parameter values simultaneously), then restores them inside a `Block` for the numerical MCMC run.
 
 ```bash
-# Check vmmc_continuous.wl (K=4, 3×3 seed, symbolic + numerical)
+# Check vmmc_continuous.wl (Gaussian proposal, 3×3 seed, symbolic + numerical)
 wolframscript -file check.wls examples3/vmmc_continuous.wl \
   SeedBitStrings=11110101011110011 Mode=Both
 ```
@@ -166,7 +170,21 @@ symParams = <|"eps" -> {...}, "couplings" -> {...}|>
 DynamicSymParams[states_List] := ...   (* per-component symbolic parameters *)
 DisplayState[state_] := ...            (* human-readable state string *)
 ValidStateIDs[maxId_] := ...           (* restrict enumeration to valid IDs *)
+$checkerAbstractParams = {"name1", "name2", ...}   (* see below *)
 ```
+
+### Abstract scalar parameters (`$checkerAbstractParams`)
+
+Use `$checkerAbstractParams` to declare scalar parameters (e.g. physical lengths or energies) that must be **unbound symbols** during the symbolic BFS so that the DB proof holds for all parameter values simultaneously, but are assigned concrete values for the numerical MCMC check.
+
+```mathematica
+(* In the .wl file — use STRING names, not symbol references *)
+physLen = 1           (* concrete value for numerical runs *)
+epsLJ   = 1
+$checkerAbstractParams = {"physLen", "epsLJ"}
+```
+
+String names are required because symbol references `{physLen, epsLJ}` evaluate to their current values (`{1, 1}`) before `check.wls` can intercept them. The checker saves the concrete values, calls `ClearAll` on each symbol, runs the symbolic BFS, then restores the concrete values inside a `Block` for the numerical MCMC run.
 
 ### Abstract field/coupling functions (`vmmc_2d_field.wl` style)
 
@@ -201,8 +219,9 @@ $abstractFunctions = True
 | `RandomInteger[n]` | Uniform over {0,…,n} |
 | `RandomChoice[list]` | Uniform choice via rejection sampling |
 | `RandomChoice[weights → elements]` | Sequential Bernoulli decomposition |
+| `RandomVariate[NormalDistribution[μ, σ]]` | Truncated Gaussian via sequential Bernoulli over `{Round[μ]−nMax, …, Round[μ]+nMax}` where `nMax = Floor[nGrid/2]`; weights are CDF differences |
 
-`RandomVariate`, `RandomSample`, `RandomPermutation` are **not** supported.
+`RandomSample`, `RandomPermutation` are **not** supported.
 
 ---
 
@@ -219,7 +238,7 @@ $abstractFunctions = True
 | `kawasaki_1d_nonergodic.wl` | Kawasaki where only type-1 particles move; type-2+ frozen | PASS | FAIL |
 | `cluster_1d_fail.wl` | Cluster slides only rightward (asymmetric proposal) | FAIL | FAIL |
 | `vmmc_2d_edit.wl` | VMMC with only 3 of 4 directions (asymmetric proposal) | FAIL on 3×3, PASS on 2×2 | — |
-| `vmmc_continuous.wl` | VMMC with K uniformly-spaced directions and extended interaction cutoff $maxD2; same code is the continuous-limit reference | PASS | PASS |
+| `vmmc_continuous.wl` | VMMC with Gaussian displacement proposal `N(0, sigStep)` rounded to integers; LJ pair energy; continuous-limit reference as nGrid→∞ | PASS | PASS |
 
 ---
 
