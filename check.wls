@@ -107,7 +107,7 @@ If[!FileExistsQ[algFile],
 (* ---- Load algorithm file ---- *)
 ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, DisplayState,
          fieldF, couplingJ,
-         $fieldFConcrete, $couplingJConcrete, $abstractFunctions, $concreteParams,
+         $fieldFConcrete, $pairEnergy, $concreteParams,
          $fieldFreeParams, $couplingFreeParams,
          $checkerAbstractParams];
 Print["Loading: ", algFile];
@@ -153,8 +153,8 @@ $hasDynParams = Length[DownValues[DynamicSymParams]] > 0;
 (* Check type pairs {1..5} at d²∈{1,2,4,5,8,9,10} — covers all
    physically relevant cases.  Uses Simplify only: negligible overhead.
    An asymmetric coupling immediately implies a DB violation.
-   In abstract-function mode ($abstractFunctions=True), couplingJ has no
-   DownValues; we check $couplingJConcrete instead via a temporary Block. *)
+   When couplingJ has no DownValues (abstract during BFS), check $pairEnergy
+   instead via a temporary Block. *)
 $checkCouplingSymmetry[] := (
   $coupSymViolations = CheckCouplingSymmetry[{1,2,3,4,5}, {1,2,4,5,8,9,10}];
   If[$coupSymViolations =!= {},
@@ -168,9 +168,9 @@ $checkCouplingSymmetry[] := (
 Which[
   Length[DownValues[couplingJ]] > 0,
     $checkCouplingSymmetry[],
-  Length[DownValues[$couplingJConcrete]] > 0,
+  Length[DownValues[$pairEnergy]] > 0,
     Block[{couplingJ},
-      couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2];
+      couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2];
       $checkCouplingSymmetry[]]];
 
 (* Static symbolic parameters (may be None if only DynamicSymParams is used) *)
@@ -364,12 +364,12 @@ Do[
       mcmcCounts = RunNumericalMCMCAT[allStates, $alg, $numBeta, "NSteps" -> nSteps];
       boltzmann  = BoltzmannWeightsAT[allStates, $energy, $numBeta]);
     $activateAndRun[] :=
-      If[ValueQ[$abstractFunctions] && TrueQ[$abstractFunctions],
+      If[Length[DownValues[$pairEnergy]] > 0 || Length[DownValues[$fieldFConcrete]] > 0,
         Block[{fieldF, couplingJ},
           If[Length[DownValues[$fieldFConcrete]] > 0,
             fieldF[x_Integer, y_Integer, L_Integer] := $fieldFConcrete[x, y, L]];
-          If[Length[DownValues[$couplingJConcrete]] > 0,
-            couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2]];
+          If[Length[DownValues[$pairEnergy]] > 0,
+            couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2]];
           $runNumericalMCMC[]],
         $runNumericalMCMC[]];
     $restoreSyms     = Map[Symbol, Keys[$abstractParamRestore]];

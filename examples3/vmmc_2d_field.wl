@@ -15,8 +15,8 @@
    possible field and coupling functions simultaneously — not just
    the specific sinusoidal/exponential forms defined below.
 
-   Concrete functions are activated (via Block) only when numerical
-   MCMC verification or animation runs are performed.
+   Concrete functions are activated (via Block) by check.wls / animate.wls
+   for numerical MCMC and animation runs.
 
    To use a different model, edit Section 0 only.
 
@@ -53,9 +53,9 @@
    TO CUSTOMISE THE MODEL
    ──────────────────────
    Edit only this section:
-     $fieldFConcrete    — your field function f(x, y, L)
-     $couplingJConcrete — your coupling J(a, b, d²); MUST be symmetric
-     $concreteParams    — numeric values for the parameters used above
+     $fieldFConcrete — your field function f(x, y, L)
+     $pairEnergy     — your coupling J(a, b, d²); MUST be symmetric
+     $concreteParams — numeric values for the parameters used above
      $maxD2             — maximum squared-distance for bonds
    ================================================================ *)
 
@@ -69,7 +69,7 @@ $fieldFConcrete[x_Integer, y_Integer, L_Integer] :=
 (* ---- CONCRETE coupling: exponential decay with per-pair amplitude ---- *)
 (* $jPairSym[a,b] = Jpair<lo><hi> is symmetric by construction.
    couplingJ[a,b,d²] = Jpair<lo><hi> · exp(−λ d²)  ✓ symmetric     *)
-$couplingJConcrete[a_Integer, b_Integer, d2_Integer] :=
+$pairEnergy[a_Integer, b_Integer, d2_Integer] :=
   $jPairSym[a, b] * Exp[-lambdaJ * d2]
 
 (* ---- Numeric parameter values for MCMC and animation runs ---- *)
@@ -78,53 +78,18 @@ $concreteParams = <|fieldAmp -> 1.0, lambdaJ -> 0.5|>
 (* ---- Nearest-neighbour only by default (fastest symbolic check) ---- *)
 $maxD2 = 1
 
-(* ---- Flag: tells check.wls / report.wls / animate.wls that fieldF and
-   couplingJ have no DownValues and need Block-based activation for
-   numerical runs. Do NOT remove this line. ---- *)
-$abstractFunctions = True
-
 (* ---- Human-readable formula strings shown in the animation panel ---- *)
 $couplingFormulaStr = "Jpair_ab * Exp[-lambdaJ * d2]"
 $fieldFormulaStr    = "fieldAmp * Sin[Pi * (x+1) / L]"
 
 
 (* ================================================================
-   SECTION 1 — Bijective integer encoding   (identical to vmmc_2d.wl)
+   SECTION 1 — Bijective integer encoding
+   ================================================================
+   Provided by dbc_core.wl (loaded by check.wls / report.wls before
+   this file).  See the "2D SQUARE LATTICE BIJECTIVE ENCODING" section
+   at the end of dbc_core.wl.
    ================================================================ *)
-
-$cL[L_]        := $cL[L]       = Sum[Binomial[L, k] * k!, {k, 0, L}]
-$cLPre[L_]     := $cLPre[L]    = Sum[$cL[l], {l, 0, L - 1}]
-$cLNPre[L_,N_] := $cLNPre[L,N] = Sum[Binomial[L, k] * k!, {k, 0, N - 1}]
-
-$rankCombo[pos_List] := Sum[Binomial[pos[[i]], i], {i, Length[pos]}]
-
-$unrankCombo[rank_, L_, N_] :=
-  Module[{pos = ConstantArray[0, N], x = L - 1, r = rank},
-    Do[While[Binomial[x, i] > r, x--]; pos[[i]] = x; r -= Binomial[x, i]; x--,
-       {i, N, 1, -1}]; pos]
-
-$rankPerm[perm_List] :=
-  Module[{n = Length[perm], elems = Range[Length[perm]], rank = 0, idx},
-    Do[idx = FirstPosition[elems, perm[[i]]][[1]] - 1;
-       rank += idx * Factorial[n - i]; elems = Delete[elems, idx + 1],
-       {i, n}]; rank]
-
-$unrankPerm[k_, n_] :=
-  Module[{elems = Range[n], perm = {}, r = k, idx},
-    Do[idx = Quotient[r, Factorial[i - 1]]; r = Mod[r, Factorial[i - 1]];
-       AppendTo[perm, elems[[idx + 1]]]; elems = Delete[elems, idx + 1],
-       {i, n, 1, -1}]; perm]
-
-$decode[id_Integer] :=
-  Module[{L = 0, N = 0, r, rpos, rperm, pos, perm, arr},
-    While[$cLPre[L + 1] <= id, L++];
-    r = id - $cLPre[L];
-    While[$cLNPre[L, N + 1] <= r, N++];
-    r -= $cLNPre[L, N];
-    rpos = Quotient[r, Factorial[N]]; rperm = Mod[r, Factorial[N]];
-    pos  = $unrankCombo[rpos, L, N]; perm  = $unrankPerm[rperm, N];
-    arr  = ConstantArray[0, L];
-    Do[arr[[pos[[i]] + 1]] = perm[[i]], {i, N}]; arr]
 
 
 (* ================================================================
@@ -393,7 +358,7 @@ ValidStateIDs[maxId_Integer] :=
      treated as a distinct free real by FullSimplify.
    "numericParams" — scalar symbols for the numerical MCMC Block:
      the $jPairSym coupling symbols plus the parameters that appear in
-     $fieldFConcrete and $couplingJConcrete ($concreteParams keys).
+     $fieldFConcrete and $pairEnergy ($concreteParams keys).
      These are assignable symbols that the Block mechanism can bind to
      numeric values. *)
 DynamicSymParams[states_List] :=

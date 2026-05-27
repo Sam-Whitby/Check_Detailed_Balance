@@ -94,7 +94,7 @@ If[!FileExistsQ[algFile],
 
 ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, DisplayState,
          fieldF, couplingJ,
-         $fieldFConcrete, $couplingJConcrete, $abstractFunctions, $concreteParams,
+         $fieldFConcrete, $pairEnergy, $concreteParams,
          $fieldFreeParams, $couplingFreeParams];
 Print["Loading: ", algFile];
 Get[algFile];
@@ -130,8 +130,8 @@ $energy  = energy;
 $numBeta = numBeta;
 
 (* ---- Verify couplingJ symmetry (if defined) ---- *)
-(* In abstract-function mode ($abstractFunctions=True), couplingJ has no
-   DownValues; we check $couplingJConcrete instead via a temporary Block. *)
+(* When couplingJ has no DownValues (abstract during BFS), check $pairEnergy
+   instead via a temporary Block. *)
 $checkCouplingSymmetry[] := (
   $coupSymViolations = CheckCouplingSymmetry[{1,2,3,4,5}, {1,2,4,5,8,9,10}];
   If[$coupSymViolations =!= {},
@@ -145,9 +145,9 @@ $checkCouplingSymmetry[] := (
 Which[
   Length[DownValues[couplingJ]] > 0,
     $checkCouplingSymmetry[],
-  Length[DownValues[$couplingJConcrete]] > 0,
+  Length[DownValues[$pairEnergy]] > 0,
     Block[{couplingJ},
-      couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2];
+      couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2];
       $checkCouplingSymmetry[]]];
 
 (* ---- Map bit string to seed state ---- *)
@@ -233,12 +233,12 @@ If[doNumerical,
     mcmcCounts = RunNumericalMCMCAT[allStates, $alg, $numBeta, "NSteps" -> nSteps];
     bw = BoltzmannWeightsAT[allStates, $energy, $numBeta]);
   $activateAndRun[] :=
-    If[ValueQ[$abstractFunctions] && TrueQ[$abstractFunctions],
+    If[Length[DownValues[$pairEnergy]] > 0 || Length[DownValues[$fieldFConcrete]] > 0,
       Block[{fieldF, couplingJ},
         If[Length[DownValues[$fieldFConcrete]] > 0,
           fieldF[x_Integer, y_Integer, L_Integer] := $fieldFConcrete[x, y, L]];
-        If[Length[DownValues[$couplingJConcrete]] > 0,
-          couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2]];
+        If[Length[DownValues[$pairEnergy]] > 0,
+          couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2]];
         $runNumericalMCMC[]],
       $runNumericalMCMC[]];
   If[allBlockVarsFull =!= {},

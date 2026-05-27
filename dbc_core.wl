@@ -2118,3 +2118,62 @@ RunFullCheck[allStates_List, symAlg_, numAlg_,
     "matrix"     -> matrix,
     "kl"         -> kl|>
 ]
+
+
+(* ================================================================
+   2D SQUARE LATTICE BIJECTIVE ENCODING
+   ================================================================
+   Maps integers bijectively to/from N-particle configurations on L
+   sites.  Used by BitsToState in 2D algorithm files.
+
+   THIS IS 2D SQUARE LATTICE SPECIFIC.
+   For 3D or non-square geometries, replace $decode (and the helper
+   functions below) with an equivalent encoding for the new geometry,
+   and update BitsToState accordingly.  The BFS core is geometry-
+   agnostic; only $decode / BitsToState need to change.
+
+   Encoding:
+     Integer id → L-element array, L = nGrid², with entries 0 (hole)
+     or k ∈ {1,…,N} (labeled particle k at that site).
+     The scheme is:
+       id = $cLPre[L] + $cLNPre[L,N] + $rankCombo[positions] * N!
+                                      + $rankPerm[labels]
+     where positions are 0-indexed site indices and labels are 1-indexed
+     particle types.
+
+   All helper functions are memoised for performance.
+   ================================================================ *)
+
+$cL[L_]        := $cL[L]       = Sum[Binomial[L, k] * k!, {k, 0, L}]
+$cLPre[L_]     := $cLPre[L]    = Sum[$cL[l], {l, 0, L - 1}]
+$cLNPre[L_,N_] := $cLNPre[L,N] = Sum[Binomial[L, k] * k!, {k, 0, N - 1}]
+
+$rankCombo[pos_List] := Sum[Binomial[pos[[i]], i], {i, Length[pos]}]
+
+$unrankCombo[rank_, L_, N_] :=
+  Module[{pos = ConstantArray[0, N], x = L - 1, r = rank},
+    Do[While[Binomial[x, i] > r, x--]; pos[[i]] = x; r -= Binomial[x, i]; x--,
+       {i, N, 1, -1}]; pos]
+
+$rankPerm[perm_List] :=
+  Module[{n = Length[perm], elems = Range[Length[perm]], rank = 0, idx},
+    Do[idx = FirstPosition[elems, perm[[i]]][[1]] - 1;
+       rank += idx * Factorial[n - i]; elems = Delete[elems, idx + 1],
+       {i, n}]; rank]
+
+$unrankPerm[k_, n_] :=
+  Module[{elems = Range[n], perm = {}, r = k, idx},
+    Do[idx = Quotient[r, Factorial[i - 1]]; r = Mod[r, Factorial[i - 1]];
+       AppendTo[perm, elems[[idx + 1]]]; elems = Delete[elems, idx + 1],
+       {i, n, 1, -1}]; perm]
+
+$decode[id_Integer] :=
+  Module[{L = 0, N = 0, r, rpos, rperm, pos, perm, arr},
+    While[$cLPre[L + 1] <= id, L++];
+    r = id - $cLPre[L];
+    While[$cLNPre[L, N + 1] <= r, N++];
+    r -= $cLNPre[L, N];
+    rpos = Quotient[r, Factorial[N]]; rperm = Mod[r, Factorial[N]];
+    pos  = $unrankCombo[rpos, L, N]; perm  = $unrankPerm[rperm, N];
+    arr  = ConstantArray[0, L];
+    Do[arr[[pos[[i]] + 1]] = perm[[i]], {i, N}]; arr]

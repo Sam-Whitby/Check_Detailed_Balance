@@ -109,7 +109,7 @@ If[!FileExistsQ[algFile],
 ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, DisplayState,
          AnimationSetupCouplings,
          fieldF, couplingJ,
-         $fieldFConcrete, $couplingJConcrete, $abstractFunctions, $concreteParams,
+         $fieldFConcrete, $pairEnergy, $concreteParams,
          $fieldFreeParams, $couplingFreeParams];
 Get[algFile];
 
@@ -126,14 +126,13 @@ Scan[Function[opt,
       ToExpression[parts[[1]] <> " = " <> parts[[2]]]]]],
   kvArgs];
 
-(* ---- Activate concrete function implementations (abstract-function mode) ----
-   In files where fieldF and couplingJ have no DownValues ($abstractFunctions=True),
+(* ---- Activate concrete function implementations ----
+   When fieldF or couplingJ have no DownValues (abstract during BFS),
    permanently install the concrete implementations for this animation run. *)
-If[ValueQ[$abstractFunctions] && TrueQ[$abstractFunctions],
-  If[Length[DownValues[$fieldFConcrete]] > 0,
-    fieldF[x_Integer, y_Integer, L_Integer] := $fieldFConcrete[x, y, L]];
-  If[Length[DownValues[$couplingJConcrete]] > 0,
-    couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2]]];
+If[Length[DownValues[$fieldFConcrete]] > 0,
+  fieldF[x_Integer, y_Integer, L_Integer] := $fieldFConcrete[x, y, L]];
+If[Length[DownValues[$pairEnergy]] > 0,
+  couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2]];
 
 If[Length[DownValues[Algorithm]] == 0,
   Print["ERROR: 'Algorithm' not defined in ", algFile]; Exit[1]];
@@ -180,7 +179,7 @@ $dynSymNames = {};
 If[Length[DownValues[DynamicSymParams]] > 0,
   With[{dynP = DynamicSymParams[{initialState}]},
     $dynSymNames = Map[ToString,
-      If[ValueQ[$abstractFunctions] && TrueQ[$abstractFunctions],
+      If[Length[DownValues[$pairEnergy]] > 0 || Length[DownValues[$fieldFConcrete]] > 0,
          Join[Lookup[dynP, "eps", {}], Lookup[dynP, "numericParams", {}]],
          Join[Lookup[dynP, "eps", {}], Lookup[dynP, "couplings",     {}]]]]]];
 
