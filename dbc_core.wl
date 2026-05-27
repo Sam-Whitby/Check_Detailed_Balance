@@ -709,117 +709,6 @@ $dbc$contToken /: Ceiling[$dbc$contToken["Uniform", 0, L_Integer, sb_]] :=
   sb[Table[1/L, {L}], Range[1, L]]
 
 
-(* ================================================================
-   SECTION 2a – SYMMETRY REDUCTION  (state canonicalization)
-   ================================================================
-   Algorithm files may declare:
-     $symmetryGroup = {"translation"}
-     $symmetryGroup = {"translation", "D4"}
-
-   "translation" — canonical = lex-min over all nGrid² torus translates.
-   "D4"          — canonical = lex-min over all 8×nGrid² orbit elements
-                   (4 rotations × 2 reflections, each preceded by all
-                   translates).
-
-   NOTE ON PARTICLE-LABEL SYMMETRY: it is tempting to add "particleLabels"
-   as a third option, exploiting the fact that permuting particle labels
-   produces an equivalent DB result (the check is symbolic and permuting
-   labels just renames free coupling variables).  This symmetry is REAL but
-   cannot be exploited via the orbit-size aggregation framework used here.
-   Orbit-size scaling is only valid when the TRANSITION MATRIX is invariant
-   under the symmetry (T(g(s)→g(s')) = T(s→s') for all g).  For spatial
-   symmetries (D4, translation) this holds because the algorithm is
-   geometrically invariant.  For label permutations it does NOT hold:
-   T(s→s') depends on $jPairSym[type_a, type_b] which is type-specific,
-   so T(π(s)→π(s')) ≠ T(s→s') when couplings are abstract free parameters.
-   Applying orbit-size scaling with label-permutation orbits therefore
-   produces incorrect (inflated) scaled matrix entries, leading to false
-   positive DB violations even for correct algorithms.
-
-   Only valid for 2D square lattices.  The algorithm author is responsible
-   for declaring the correct symmetry; an incorrectly declared symmetry
-   can produce false positives in the DB check.  check.wls additionally
-   refuses to enable symmetry when a field function (fieldF/$fieldFConcrete)
-   is active.
-
-   $dbcTreeMeta — sentinel Association key stored alongside state keys in
-   the BuildTreeAT result; holds metadata (fullCount for ergodicity check).
-   ================================================================ *)
-
-$dbcTreeMeta  (* sentinel symbol, used as a key in BuildTreeAT output *)
-
-$dbcApplyTranslation[state_List, dr_Integer, dc_Integer, nGrid_Integer] :=
-  Table[
-    With[{rp = Ceiling[j/nGrid], cp = Mod[j-1, nGrid] + 1},
-      state[[Mod[rp - dr - 1, nGrid]*nGrid + Mod[cp - dc - 1, nGrid] + 1]]],
-    {j, nGrid^2}]
-
-$dbcApply90CW[state_List, nGrid_Integer] :=
-  Table[
-    With[{rp = Ceiling[j/nGrid], cp = Mod[j-1, nGrid] + 1},
-      state[[(nGrid - cp)*nGrid + rp]]],
-    {j, nGrid^2}]
-
-$dbcApplyReflectH[state_List, nGrid_Integer] :=
-  Table[
-    With[{rp = Ceiling[j/nGrid], cp = Mod[j-1, nGrid] + 1},
-      state[[(rp - 1)*nGrid + nGrid - cp + 1]]],
-    {j, nGrid^2}]
-
-$dbcD4Orbit[state_List, nGrid_Integer] :=
-  Module[{r0 = state, r1, r2, r3},
-    r1 = $dbcApply90CW[r0, nGrid];
-    r2 = $dbcApply90CW[r1, nGrid];
-    r3 = $dbcApply90CW[r2, nGrid];
-    {r0, r1, r2, r3,
-     $dbcApplyReflectH[r0, nGrid],
-     $dbcApplyReflectH[r1, nGrid],
-     $dbcApplyReflectH[r2, nGrid],
-     $dbcApplyReflectH[r3, nGrid]}]
-
-(* Memoized: lex-min representative over the declared symmetry orbit.
-   Table with iterators {r},{dr},{dc} gives a {8,nGrid,nGrid} array of state vectors;
-   Flatten[..,2] collapses both outer levels to yield a flat list of 8·nGrid² vectors. *)
-$dbcCanonicalState[state_List, nGrid_Integer, symGroup_List] :=
-  $dbcCanonicalState[state, nGrid, symGroup] =
-  Which[
-    MemberQ[symGroup, "D4"],
-      Sort[Flatten[
-        Table[$dbcApplyTranslation[r, dr, dc, nGrid],
-              {r, $dbcD4Orbit[state, nGrid]},
-              {dr, 0, nGrid - 1}, {dc, 0, nGrid - 1}], 2]][[1]],
-    MemberQ[symGroup, "translation"],
-      (* Two iterators give a {nGrid,nGrid} array; Flatten[..,1] → nGrid² flat vectors *)
-      Sort[Flatten[
-        Table[$dbcApplyTranslation[state, dr, dc, nGrid],
-              {dr, 0, nGrid - 1}, {dc, 0, nGrid - 1}], 1]][[1]],
-    True, state]
-
-(* All distinct states in the orbit of canonState under symGroup *)
-$dbcOrbitStates[canonState_List, nGrid_Integer, symGroup_List] :=
-  Which[
-    MemberQ[symGroup, "D4"],
-      DeleteDuplicates @ Flatten[
-        Table[$dbcApplyTranslation[r, dr, dc, nGrid],
-              {r, $dbcD4Orbit[canonState, nGrid]},
-              {dr, 0, nGrid - 1}, {dc, 0, nGrid - 1}], 2],
-    MemberQ[symGroup, "translation"],
-      DeleteDuplicates @ Flatten[
-        Table[$dbcApplyTranslation[canonState, dr, dc, nGrid],
-              {dr, 0, nGrid - 1}, {dc, 0, nGrid - 1}], 1],
-    True, {canonState}]
-
-(* Add fullCount overload to CheckErgodicity for symmetry-reduced state sets.
-   Called from check.wls when treeData contains $dbcTreeMeta metadata. *)
-CheckErgodicity[allStates_List, fullCount_Integer] :=
-  Module[{s0, S, N, theoretical},
-    s0          = First[allStates];
-    S           = Length[s0];
-    N           = Count[s0, k_ /; k > 0];
-    theoretical = Product[S - k, {k, 0, N - 1}];
-    <|"ergodic"      -> (fullCount == theoretical),
-      "found"        -> fullCount,
-      "theoretical"  -> theoretical|>]
 
 
 (* ================================================================
@@ -835,30 +724,22 @@ CheckErgodicity[allStates_List, fullCount_Integer] :=
    Returns  Association[ state -> { {bits, nextState, pathWeight}, ... } ]
    ---------------------------------------------------------------- *)
 Options[BuildTreeAT] = {
-  "MaxBitDepth"   -> 20,
-  "TimeLimit"     -> 60.,
-  "Verbose"       -> True,
-  "SymmetryGroup" -> {}
+  "MaxBitDepth" -> 20,
+  "TimeLimit"   -> 60.,
+  "Verbose"     -> True
 }
 
 BuildTreeAT[seedState_, alg_, OptionsPattern[]] := Module[
-  {maxDepth    = OptionValue["MaxBitDepth"],
-   tlim        = N @ OptionValue["TimeLimit"],
-   verbose     = OptionValue["Verbose"],
-   symGroup    = OptionValue["SymmetryGroup"],
-   nGrid, useSymmetry, $canon,
+  {maxDepth = OptionValue["MaxBitDepth"],
+   tlim     = N @ OptionValue["TimeLimit"],
+   verbose  = OptionValue["Verbose"],
+   nGrid,
    discovered, toProcess, result,
-   s, queue, bits, res, ns, nsCanon, w, leaves, t0, timedOut, seedCanon},
+   s, queue, bits, res, ns, w, leaves, t0, timedOut},
 
-  nGrid       = Round[Sqrt[Length[seedState]]];
-  useSymmetry = symGroup =!= {} && nGrid^2 == Length[seedState];
-  $canon      = If[useSymmetry,
-    Function[st, $dbcCanonicalState[st, nGrid, symGroup]],
-    Identity];
-
-  seedCanon  = $canon[seedState];
-  discovered = {seedCanon};
-  toProcess  = {seedCanon};
+  nGrid      = Round[Sqrt[Length[seedState]]];
+  discovered = {seedState};
+  toProcess  = {seedState};
   result     = <||>;
 
   While[toProcess =!= {},
@@ -904,22 +785,16 @@ BuildTreeAT[seedState_, alg_, OptionsPattern[]] := Module[
               "Algorithm returned unevaluated call -- pattern mismatch or argument error"],
               Module]
           ];
-          nsCanon = $canon[ns];
-          AppendTo[leaves, {bits, nsCanon, w}];
-          If[!MemberQ[discovered, nsCanon],
-            AppendTo[discovered, nsCanon];
-            AppendTo[toProcess, nsCanon]]
+          AppendTo[leaves, {bits, ns, w}];
+          If[!MemberQ[discovered, ns],
+            AppendTo[discovered, ns];
+            AppendTo[toProcess, ns]]
       ]
     ];
 
     If[timedOut, Print["  WARNING: Time limit reached for state ", s]];
     result[s] = leaves
   ];
-
-  (* Metadata: full state count via orbit expansion (for ergodicity check) *)
-  If[useSymmetry,
-    result[$dbcTreeMeta] = <|"fullCount" ->
-      Total[Length[$dbcOrbitStates[#, nGrid, symGroup]] & /@ Keys[result]]|>];
 
   result
 ]
@@ -939,7 +814,7 @@ TreeATToMatrix[treeData_Association] := Module[
       ],
       {leaf, treeData[s]}
     ],
-    {s, Select[Keys[treeData], # =!= $dbcTreeMeta &]}
+    {s, Keys[treeData]}
   ];
   matrix
 ]

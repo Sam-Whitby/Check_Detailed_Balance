@@ -149,10 +149,6 @@ Algorithm[state_List] :=
                      for this system (physLen/epsLJ are restored via
                      $checkerAbstractParams / $abstractParamRestore). *)
 
-(* Symmetry group: Gaussian proposal is isotropic and LJ energy has no field.
-   Both translation and D4 (4 rotations + 4 reflections) are valid symmetries. *)
-$symmetryGroup = {"translation", "D4"}
-
 DynamicSymParams[states_List] :=
   Module[{types, nGrid, d2Vals, couplingAtoms},
     types  = Sort[DeleteCases[Union @@ states, 0]];

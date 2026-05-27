@@ -14,35 +14,11 @@ Symbolically proves or disproves detailed balance for Monte Carlo algorithms wri
 
 2. **BFS over bit sequences.** Starting from a seed state, all possible bit sequences are enumerated. Each complete path gives a (start, end, weight) triple. Weights for the same (start, end) pair are summed to form the symbolic transition matrix T.
 
-   If the algorithm declares `$symmetryGroup`, BFS operates on *canonical representatives* only — one state per symmetry orbit. States are canonicalised to the lexicographic minimum over the orbit before being added to the BFS queue. This reduces the number of states processed by a factor equal to the orbit size (up to 8·nGrid² for full D4 + translation symmetry), without affecting correctness.
+3. **Symbolic DB check.** For each state pair (i,j): `T(i→j)·exp(−β E(i)) = T(j→i)·exp(−β E(j))`. β is a free symbol so Boltzmann factors cancel algebraically.
 
-3. **Symbolic DB check.** For each canonical state pair (i,j): `|orbit(i)|·T(i→j)·exp(−β E(i)) = |orbit(j)|·T(j→i)·exp(−β E(j))`. The orbit-size factors (integers) correct for the fact that canonical states may represent different numbers of physical states. β is a free symbol so Boltzmann factors cancel algebraically.
+4. **Numerical MCMC check.** The algorithm is run as a genuine Markov chain. KL divergence between sampled frequencies and the Boltzmann distribution is computed; KL < 0.02 is a pass.
 
-4. **Numerical MCMC check.** Canonical states are expanded back to their full orbits for MCMC; visit counts and Boltzmann weights are aggregated by orbit. KL < 0.02 is a pass.
-
-**Ergodicity check.** For N labeled particles on S sites, the theoretical reachable state count is (S)_N = S·(S−1)·…·(S−N+1). With symmetry enabled, this full count is compared against the number of physical states represented by the canonical set.
-
----
-
-## Symmetry reduction
-
-Algorithm files can declare `$symmetryGroup` to enable BFS state canonicalization:
-
-```mathematica
-$symmetryGroup = {"translation"}        (* torus translations only *)
-$symmetryGroup = {"translation", "D4"}  (* translations + 4 rotations + 4 reflections *)
-```
-
-**What counts as a valid symmetry group:**
-- The energy function must be invariant under the declared symmetries.
-- The proposal distribution must be invariant (i.e. the move kernel commutes with the symmetry).
-- Both conditions hold for nearest-neighbour or isotropic energy functions on a square torus with uniform or Gaussian proposals.
-
-**Field check.** If the algorithm defines `fieldF` or `$fieldFConcrete` (a spatially varying external field), symmetry reduction is automatically disabled regardless of `$symmetryGroup`. Fields break translational symmetry.
-
-**Orbit-size correction.** When two canonical states have orbits of different sizes (e.g. a fully symmetric configuration vs. a generic one), the DB condition must account for this. The checker scales the transition matrix entry T(i→j) by |orbit(i)| before the algebraic check, so integer factors appear instead of rational functions of β — much easier for `FullSimplify`.
-
-**Why particle-label permutation cannot be added as a third symmetry.** Permuting particle labels (e.g. swapping which specific particle sits where, while keeping all positions fixed) produces an algorithmically equivalent system in the following sense: the DB *result* (PASS/FAIL) is always identical between label-permuted configurations, because the check is symbolic and permuting labels merely renames the free coupling variables `$jPairSym[1,2]`, `$jPairSym[1,3]`, etc. It is tempting to add `"particleLabels"` as a third symmetry option. However, the orbit-size scaling framework requires that the **transition matrix** itself be invariant under the symmetry — i.e. `T(g(s)→g(s')) = T(s→s')` for all group elements g. This holds for spatial symmetries (D4, translation) because the algorithm is geometrically invariant. It does **not** hold for label permutations: `T(s→s')` depends on `$jPairSym[type_a, type_b]`, which is type-specific, so `T(π(s)→π(s')) ≠ T(s→s')` when the coupling constants are abstract free parameters. Applying orbit-size scaling with a label-permutation orbit inflates the scaled matrix entries, producing false positive DB violations even for correct algorithms (verified empirically on `kawasaki_2d.wl`). Furthermore, for diffusive algorithms (Kawasaki, VMMC) all label-permuted states of a given geometric configuration are in the **same** connected component anyway — particles can diffuse to any arrangement — so label permutation yields no reduction in the number of components to check.
+**Ergodicity check.** For N labeled particles on S sites, the theoretical reachable state count is (S)_N = S·(S−1)·…·(S−N+1). The number of states discovered by BFS is compared to this value.
 
 ---
 
@@ -93,7 +69,6 @@ DynamicSymParams[states_List] := ...   (* per-component symbolic parameters *)
 DisplayState[state_] := ...            (* human-readable state string *)
 ValidStateIDs[maxId_] := ...           (* restrict enumeration to valid IDs *)
 $checkerAbstractParams = {"name1", ...} (* scalar params cleared before BFS *)
-$symmetryGroup = {"translation", "D4"} (* symmetry group for BFS canonicalization *)
 ```
 
 ### Abstract scalar parameters (`$checkerAbstractParams`)
@@ -205,7 +180,7 @@ Any `name=value` argument not in the table is applied as a Mathematica assignmen
 ## Quick examples
 
 ```bash
-# Check all 2×2 components of vmmc_continuous.wl (symmetry-reduced, lazy iteration)
+# Check all 2×2 components of vmmc_continuous.wl (lazy iteration)
 wolframscript -file check.wls examples3/vmmc_continuous.wl NGrid=2 Mode=Both
 
 # Check the first 3×3 component only (lazily — no large list built upfront)
@@ -216,10 +191,10 @@ wolframscript -file check.wls examples3/vmmc_continuous.wl \
 wolframscript -file check.wls examples3/vmmc_continuous.wl \
   SeedBitStrings=11110101011110011 Mode=Both
 
-# Check 2D Kawasaki (all 2×2 components, symmetry-reduced)
+# Check 2D Kawasaki (all 2×2 components)
 wolframscript -file check.wls examples3/kawasaki_2d.wl NGrid=2 Mode=Symbolic
 
-# Check VMMC with user-defined field (symmetry auto-disabled; fast polynomial checker)
+# Check VMMC with user-defined field (fast polynomial checker)
 wolframscript -file check.wls examples3/vmmc_2d_field.wl \
   MaxBitString=1111111111 Mode=Symbolic FastChecker=1
 
@@ -240,21 +215,45 @@ wolframscript -file animate.wls examples3/vmmc_2d_field.wl \
 
 ## Example files (`examples3/`)
 
-| File | Description | Symmetry | DB | Ergodic |
-|------|-------------|----------|----|---------|
-| `kawasaki_1d.wl` | 1D Kawasaki nearest-neighbour swap on a periodic ring | — | PASS | PASS |
-| `kawasaki_2d.wl` | 2D Kawasaki on a periodic square lattice | translation, D4 | PASS | PASS |
-| `vmmc_2d_field.wl` | VMMC with user-defined field and coupling functions | — (field) | PASS | PASS |
-| `vmmc_continuous.wl` | VMMC with Gaussian proposal, LJ energy; three-file structure | translation, D4 | PASS | PASS |
-| `jump_1d_weighted.wl` | 1D jump dynamics using `RandomChoice[weights → ...]` | — | PASS | PASS |
-| `kawasaki_1d_fail.wl` | Sign-reversed dE in Metropolis | — | FAIL | PASS |
-| `kawasaki_1d_nonergodic.wl` | Only type-1 particles move; type-2+ frozen | — | PASS | FAIL |
-| `cluster_1d_fail.wl` | Cluster slides only rightward (asymmetric proposal) | — | FAIL | FAIL |
-| `vmmc_2d_edit.wl` | VMMC with only 3 of 4 directions (asymmetric proposal) | — | FAIL on 3×3 | — |
+| File | Description | DB | Ergodic |
+|------|-------------|-----|---------|
+| `kawasaki_1d.wl` | 1D Kawasaki nearest-neighbour swap on a periodic ring | PASS | PASS |
+| `kawasaki_2d.wl` | 2D Kawasaki on a periodic square lattice | PASS | PASS |
+| `vmmc_2d_field.wl` | VMMC with user-defined field and coupling functions | PASS | PASS |
+| `vmmc_continuous.wl` | VMMC with Gaussian proposal, LJ energy; three-file structure | PASS | PASS |
+| `jump_1d_weighted.wl` | 1D jump dynamics using `RandomChoice[weights → ...]` | PASS | PASS |
+| `kawasaki_1d_fail.wl` | Sign-reversed dE in Metropolis | FAIL | PASS |
+| `kawasaki_1d_nonergodic.wl` | Only type-1 particles move; type-2+ frozen | PASS | FAIL |
+| `cluster_1d_fail.wl` | Cluster slides only rightward (asymmetric proposal) | FAIL | FAIL |
+| `vmmc_2d_edit.wl` | VMMC with only 3 of 4 directions (asymmetric proposal) | FAIL on 3×3 | — |
 
 `kawasaki_1d_nonergodic.wl` demonstrates the key case: **DB PASS + Ergodicity FAIL**. Detailed balance cannot detect non-ergodicity; the two checks are independent.
 
-`vmmc_2d_field.wl` demonstrates automatic symmetry disabling: it declares `$symmetryGroup = {"translation", "D4"}` but the presence of `fieldF` causes the checker to ignore this declaration.
+---
+
+## Potential future improvements
+
+The checker currently performs an exhaustive BFS over all reachable states in each connected component, checking DB for every pair. This is provably rigorous but can be slow for large lattices or many particle types. Several approaches could reduce the state count and pair count significantly:
+
+### Geometric symmetry reduction
+
+For algorithms on a square-torus lattice with a symmetric energy and isotropic or uniform proposal distribution, the transition kernel is invariant under the lattice symmetry group G (e.g. translations, or the full D4 group of 4 rotations and 4 reflections). States related by a symmetry transformation have identical DB behaviour. Rather than checking every state independently, one could canonicalise each state to the lexicographic minimum within its orbit under G and run BFS only from canonical representatives. This reduces the number of states by a factor up to |G| (up to 8·nGrid² for full D4 + translation).
+
+**Making this rigorous.** Orbit-size reduction is only valid when the transition matrix itself is G-invariant — i.e. T(g(s)→g(s')) = T(s→s') for all g ∈ G. This allows DB for orbit-representative pairs (c₁, c₂) to be checked with an orbit-size correction factor |orbit(c₁)| on each matrix entry. Exploiting this correctly requires:
+
+1. *Verifying G-invariance of the algorithm.* This can be done algorithmically: run BFS from a non-canonical orbit member g(c) and check that the resulting transition probabilities match the G-transformed predictions from the BFS of c. This is an exact symbolic check.
+
+2. *Checking intra-orbit detailed balance.* States within the same orbit can still transition to each other, and these intra-orbit DB conditions are not covered by the inter-orbit orbit-size check. With G-invariance confirmed, intra-orbit DB reduces to verifying that T(c → h(c)) = T(c → h⁻¹(c)) for all group elements h — a proposal-symmetry condition (e.g. clockwise and anti-clockwise rotations are equally likely) that can be checked directly from the BFS output by tracking individual intra-orbit transition probabilities.
+
+If both conditions are confirmed symbolically, the orbit-aggregated DB check is equivalent to the full pairwise check and the reduction in computational cost is genuine with no loss of rigour.
+
+### Particle-label symmetry
+
+Permuting particle labels (which specific labeled particle occupies which site) while holding positions fixed always produces an equivalent DB result — permuting labels merely renames the free coupling variables. However, this symmetry **cannot** be exploited via orbit-size aggregation. The orbit-size framework requires that the transition matrix is invariant under the symmetry, but T(s→s') depends on type-specific coupling symbols `$jPairSym[a, b]`, so T(π(s)→π(s')) ≠ T(s→s') when couplings are abstract free parameters. Applying orbit-size scaling with label-permutation orbits inflates the matrix entries and produces false positive DB violations even for correct algorithms (verified empirically). For diffusive algorithms such as Kawasaki and VMMC, label-permuted states all lie in the same connected component anyway, so there would be no reduction in the number of components to check even if the orbit reduction were valid.
+
+### Expression deduplication
+
+The current checker already deduplicates syntactically identical DB expressions before passing them to `FullSimplify` (the `$dbcDedup` step). Geometric symmetry would make more expressions identical by construction, amplifying this existing speedup.
 
 ---
 
