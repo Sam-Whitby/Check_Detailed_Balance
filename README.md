@@ -145,7 +145,9 @@ wolframscript -file check.wls <algorithm.wl> [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `MaxBitString=XXXX` | `11111111` | Largest bit string tested |
+| `NGrid=N` | off | Only test N×N grid states; iterates IDs lazily (no large list materialised) |
+| `MaxComponents=N` | unlimited | Stop after N distinct connected components are found |
+| `MaxBitString=XXXX` | `11111111` | Largest bit string to enumerate (overridden by `NGrid`) |
 | `SeedBitStrings=X,Y` | off | Test specific bit strings directly (BFS from each discovers the full component) |
 | `Mode=Symbolic\|Numerical\|Both` | `Both` | Which checks to run |
 | `NSteps=N` | `50000` | MCMC steps for numerical check |
@@ -153,6 +155,8 @@ wolframscript -file check.wls <algorithm.wl> [options]
 | `FastChecker=1` | off | Exp-polynomial fast checker (see below) |
 | `PhysFidelity=1` | off | Compare T_MC to physical Glauber dynamics; adds M1 and M2 columns (see below) |
 | `Verbose=True` | `False` | Per-state BFS progress |
+
+`NGrid` and `MaxComponents` together give an intuitive interface: `NGrid=2 MaxComponents=6` means "check the first 6 distinct 2×2 systems, stop there." Both options use lazy ID iteration internally so no large list is held in memory, even when the total state count for that grid size is in the millions.
 
 ### Report (single seed state)
 ```bash
@@ -191,20 +195,27 @@ Any `name=value` argument not in the table is applied as a Mathematica assignmen
 ## Quick examples
 
 ```bash
-# Check vmmc_continuous.wl (Gaussian VMMC, 3×3 seed, symmetry-reduced)
+# Check all 2×2 components of vmmc_continuous.wl (symmetry-reduced, lazy iteration)
+wolframscript -file check.wls examples3/vmmc_continuous.wl NGrid=2 Mode=Both
+
+# Check the first 3×3 component only (lazily — no large list built upfront)
+wolframscript -file check.wls examples3/vmmc_continuous.wl \
+  NGrid=3 MaxComponents=1 Mode=Symbolic FastChecker=1
+
+# Check a specific seed state (BFS discovers the full component)
 wolframscript -file check.wls examples3/vmmc_continuous.wl \
   SeedBitStrings=11110101011110011 Mode=Both
 
-# Animate on a 20×20 grid (physLen=2, cutoff just past LJ minimum)
-wolframscript -file animate.wls examples3/vmmc_continuous.wl \
-  Sites=400 N=10 Steps=2000 Beta=1 FPS=8 Simple=1 NoParams=1 physLen=2 '$maxD2=8'
-
-# Check 2D Kawasaki symbolically + numerically (symmetry-reduced)
-wolframscript -file check.wls examples3/kawasaki_2d.wl
+# Check 2D Kawasaki (all 2×2 components, symmetry-reduced)
+wolframscript -file check.wls examples3/kawasaki_2d.wl NGrid=2 Mode=Symbolic
 
 # Check VMMC with user-defined field (symmetry auto-disabled; fast polynomial checker)
 wolframscript -file check.wls examples3/vmmc_2d_field.wl \
   MaxBitString=1111111111 Mode=Symbolic FastChecker=1
+
+# Animate on a 20×20 grid (physLen=2, cutoff just past LJ minimum)
+wolframscript -file animate.wls examples3/vmmc_continuous.wl \
+  Sites=400 N=10 Steps=2000 Beta=1 FPS=8 Simple=1 NoParams=1 physLen=2 '$maxD2=8'
 
 # Report for a specific seed
 wolframscript -file report.wls examples3/vmmc_continuous.wl \

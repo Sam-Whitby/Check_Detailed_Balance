@@ -66,7 +66,9 @@ If[Length[posArgs] < 1,
   Print["  numBeta              numeric inverse temperature"];
   Print[""];
   Print["Options (key=value, no spaces around =):"];
-  Print["  MaxBitString=XXXX    Largest bit string (default 11111111)"];
+  Print["  NGrid=N              Only test N×N grid states (recommended for 2D)"];
+  Print["  MaxComponents=N      Stop after N distinct components (default: all)"];
+  Print["  MaxBitString=XXXX    Largest bit string to enumerate (default 11111111)"];
   Print["  SeedBitStrings=X,Y  Comma-separated bit strings to test directly"];
   Print["  Mode=Symbolic|Numerical|Both  (default Both)"];
   Print["  NSteps=N             MCMC steps per system (default 50000)"];
@@ -83,6 +85,8 @@ verbose         = False;
 fastChecker     = False;   (* FastChecker=1: use Exp-polynomial fast path *)
 seedBitStrings  = None;    (* SeedBitStrings=X,Y: test specific bit strings *)
 physFidelity    = False;   (* PhysFidelity=1: compare T_MC to T_phys (Glauber) *)
+maxComponents   = Infinity; (* MaxComponents=N: stop after N distinct components *)
+nGrid           = None;    (* NGrid=N: only test N×N grid states *)
 
 Do[
   If[StringMatchQ[opt, "MaxBitString="   ~~ __], maxBitString   = StringDrop[opt, 13]];
@@ -92,7 +96,9 @@ Do[
   If[StringMatchQ[opt, "MaxBitDepth="    ~~ __], maxBitDepth    = ToExpression[StringDrop[opt, 12]]];
   If[StringMatchQ[opt, "Verbose="        ~~ __], verbose        = ToExpression[StringDrop[opt,  8]]];
   If[StringMatchQ[opt, "FastChecker="    ~~ __], fastChecker    = (StringDrop[opt, 12] =!= "0")];
-  If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")],
+  If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")];
+  If[StringMatchQ[opt, "MaxComponents="  ~~ __], maxComponents  = ToExpression[StringDrop[opt, 14]]];
+  If[StringMatchQ[opt, "NGrid="          ~~ __], nGrid          = ToExpression[StringDrop[opt,  6]]],
   {opt, kvArgs}];
 
 (* ---- Validate MaxBitString ---- *)
@@ -205,21 +211,37 @@ $fixedParams  = If[AssociationQ[$staticSysParams],
 $fixedSymVars = Keys[$fixedParams];
 $fixedNumVals = Values[$fixedParams];
 
-(* ---- Generate candidate bit strings ---- *)
+(* ---- Set up iteration over candidate states ---- *)
 maxBitVec = ToExpression /@ Characters[maxBitString];
 maxLen     = Length[maxBitVec];
 maxVal     = FromDigits[maxBitVec, 2];
 
-(* SeedBitStrings=X,Y overrides MaxBitString enumeration entirely.
-   Each comma-separated token is treated as a literal bit string.
-   BFS from each seed will discover the full component as usual. *)
-allBitStrings =
-  If[seedBitStrings =!= None,
-    (* Parse comma-separated bit strings and convert chars to integers *)
-    Map[ToExpression /@ Characters[#] &, StringSplit[seedBitStrings, ","]],
-    (* Otherwise: enumerate from MaxBitString (with ValidStateIDs if available) *)
-    If[Length[DownValues[ValidStateIDs]] > 0,
-      IntegerDigits[#, 2] & /@ ValidStateIDs[maxVal],
+(* When NGrid=N is set, ensure maxVal covers all N×N states so that the lazy
+   iterator reaches them even if the user did not also set MaxBitString. *)
+If[nGrid =!= None,
+  maxVal = Max[maxVal, $cLPre[nGrid^2 + 1] - 1]];
+
+(* Lazy mode: iterate state IDs by grid-size block, generating each bit string
+   on the fly.  No large list is materialised in memory.
+   Active when NGrid is set, or when ValidStateIDs is defined (2D algorithms).
+   SeedBitStrings always uses the eager path (the explicit seed list is small).
+   Non-2D algorithms (no ValidStateIDs, no NGrid) also use the eager path. *)
+$useLazy = seedBitStrings === None &&
+           (nGrid =!= None || Length[DownValues[ValidStateIDs]] > 0);
+
+If[$useLazy,
+  (* Grid-size blocks to iterate: just {nGrid^2} when NGrid is set, else all
+     square sizes up to maxVal.  Computed once; IDs generated lazily in the loop. *)
+  $lazyGridL2s =
+    If[nGrid =!= None,
+      {nGrid^2},
+      Module[{L = 1, sizes = {}},
+        While[$cLPre[L^2] <= maxVal, AppendTo[sizes, L^2]; L++];
+        sizes]],
+  (* Eager path: materialise a small list (SeedBitStrings or non-2D enumeration) *)
+  $eagerBitStrings =
+    If[seedBitStrings =!= None,
+      Map[ToExpression /@ Characters[#] &, StringSplit[seedBitStrings, ","]],
       Join[
         Flatten[Table[IntegerDigits[i, 2, len],
                       {len, 1, maxLen - 1}, {i, 0, 2^len - 1}], 1],
@@ -242,11 +264,23 @@ Print[];
 Print[StringRepeat["=", totalCols]];
 Print["DETAILED BALANCE CHECKER"];
 Print["File:          ", algFile];
-If[seedBitStrings =!= None,
-  Print["SeedBitStrings: ", seedBitStrings,
-        "  (", Length[allBitStrings], " seed states)"],
-  Print["MaxBitString:  ", maxBitString,
-        "  (", Length[allBitStrings], " bit strings generated)"]];
+Which[
+  seedBitStrings =!= None,
+    Print["SeedBitStrings: ", seedBitStrings,
+          "  (", Length[$eagerBitStrings], " seed states)"],
+  nGrid =!= None,
+    Print["NGrid:         ", nGrid, "x", nGrid,
+          "  (", $cLPre[nGrid^2+1] - $cLPre[nGrid^2], " state IDs -- all ",
+          nGrid, "x", nGrid, " states)",
+          If[IntegerQ[maxComponents], "  MaxComponents: " <> ToString[maxComponents], ""]],
+  $useLazy,
+    Print["MaxBitString:  ", maxBitString, "  (lazy: ",
+          ToString[Length[$lazyGridL2s]], " grid size(s), IDs generated on-the-fly)",
+          If[IntegerQ[maxComponents], "  MaxComponents: " <> ToString[maxComponents], ""]],
+  True,
+    Print["MaxBitString:  ", maxBitString,
+          "  (", Length[$eagerBitStrings], " bit strings)",
+          If[IntegerQ[maxComponents], "  MaxComponents: " <> ToString[maxComponents], ""]]];
 Print["Mode:          ", mode];
 If[mode =!= "Symbolic", Print["NSteps:        ", nSteps]];
 Print["MaxBitDepth:   ", maxBitDepth];
@@ -275,7 +309,8 @@ Print[StringRepeat["-", totalCols]];
 (* ================================================================
    Progress bar helpers
    ================================================================ *)
-$nBitStrings = Length[allBitStrings];
+(* In eager mode we know the total; in lazy mode we track component count. *)
+$nBitStrings = If[$useLazy, Infinity, Length[$eagerBitStrings]];
 $checkStart  = AbsoluteTime[];
 $barWidth    = 28;
 
@@ -286,22 +321,32 @@ formatDuration[secs_] :=
         True,        ToString[Floor[secs/3600]] <> "h " <>
                      ToString[Floor[Mod[secs/60, 60]]] <> "m"];
 
-writeProgress[idx_] := If[verbose, Module[{elapsed, pct, filled, arrow, bar, eta, etaStr, elStr},
+writeProgress[idx_] := If[verbose, Module[{elapsed, elStr},
   elapsed = AbsoluteTime[] - $checkStart;
-  pct     = If[$nBitStrings > 0, idx / $nBitStrings, 0.];
-  filled  = Round[pct * $barWidth];
-  arrow   = If[filled < $barWidth, ">", ""];
-  bar     = "[" <> StringRepeat["=", filled] <> arrow <>
-            StringRepeat[" ", Max[0, $barWidth - filled - StringLength[arrow]]] <> "]";
-  eta     = If[idx > 0 && elapsed > 0,
-               elapsed * ($nBitStrings - idx) / idx,
-               Infinity];
-  etaStr  = If[!NumberQ[eta] || eta === Infinity, "?", formatDuration[eta]];
   elStr   = formatDuration[elapsed];
-  WriteString[$Output,
-    "\r" <> bar <> " " <> ToString[idx] <> "/" <> ToString[$nBitStrings] <>
-    "  " <> ToString[Round[pct * 100]] <> "%  elapsed: " <> elStr <>
-    "  ETA: " <> etaStr <> "   "]]];  (* trailing spaces clear previous longer text *)
+  If[$useLazy,
+    (* Lazy mode: show component count; total unknown until MaxComponents is reached *)
+    WriteString[$Output,
+      "\r[" <> ToString[testedCount] <> " component" <>
+      If[testedCount =!= 1, "s", ""] <>
+      If[IntegerQ[maxComponents],
+         "/" <> ToString[maxComponents], " found"] <>
+      "  elapsed: " <> elStr <> "]   "],
+    (* Eager mode: traditional idx/total progress bar *)
+    Module[{pct, filled, arrow, bar, eta, etaStr},
+      pct    = If[$nBitStrings > 0, idx / $nBitStrings, 0.];
+      filled = Round[pct * $barWidth];
+      arrow  = If[filled < $barWidth, ">", ""];
+      bar    = "[" <> StringRepeat["=", filled] <> arrow <>
+               StringRepeat[" ", Max[0, $barWidth - filled - StringLength[arrow]]] <> "]";
+      eta    = If[idx > 0 && elapsed > 0,
+                  elapsed * ($nBitStrings - idx) / idx,
+                  Infinity];
+      etaStr = If[!NumberQ[eta] || eta === Infinity, "?", formatDuration[eta]];
+      WriteString[$Output,
+        "\r" <> bar <> " " <> ToString[idx] <> "/" <> ToString[$nBitStrings] <>
+        "  " <> ToString[Round[pct * 100]] <> "%  elapsed: " <> elStr <>
+        "  ETA: " <> etaStr <> "   "]]]]];  (* trailing spaces clear previous longer text *)
 
 (* Before printing a permanent row: clear the progress line first *)
 clearProgress[] := If[verbose, WriteString[$Output, "\r" <> StringRepeat[" ", 78] <> "\r"]];
@@ -309,18 +354,21 @@ clearProgress[] := If[verbose, WriteString[$Output, "\r" <> StringRepeat[" ", 78
 (* ================================================================
    Main loop
    ================================================================ *)
-coveredAssoc = <||>;   (* Association for O(1) covered-state lookup *)
-testedCount  = 0;
+coveredAssoc  = <||>;   (* Association for O(1) covered-state lookup *)
+testedCount   = 0;
 symPassCount  = 0; symFailCount  = 0;
 numPassCount  = 0; numFailCount  = 0;
 ergoPassCount = 0; ergoFailCount = 0;
-$loopIdx     = 0;
+$loopIdx      = 0;
 
-Do[
-  $loopIdx++;
+(* ---- Loop body: process one bit string.
+        Uses Throw[Null, $dbcSkip] in place of Continue[].
+        Returns True when MaxComponents has been reached (signal outer loop to stop). ---- *)
+$loopBody[bitString_List] := Catch[
+
   state = Check[BitsToState[bitString], $Failed];
   If[state === $Failed || state === None,
-    writeProgress[$loopIdx]; Continue[]];
+    writeProgress[$loopIdx]; Throw[Null, $dbcSkip]];
   (* When symmetry is active, canonicalize before the covered check so that
      orbit members of an already-processed state are correctly skipped. *)
   If[$useSymmetry,
@@ -328,7 +376,7 @@ Do[
       If[ng^2 == Length[state],
         state = $dbcCanonicalState[state, ng, $symGroupRaw]]]];
   If[KeyExistsQ[coveredAssoc, state],
-    writeProgress[$loopIdx]; Continue[]];
+    writeProgress[$loopIdx]; Throw[Null, $dbcSkip]];
 
   bitsStr  = StringJoin[ToString /@ bitString];
   stateStr = If[Length[DownValues[DisplayState]] > 0,
@@ -346,7 +394,7 @@ Do[
     Print[StringPadRight[bitsStr,  colBits], StringPadRight[stateStr, colState],
           StringPadRight["?", colN], "ERROR: ", treeData[[1]]];
     writeProgress[$loopIdx];
-    testedCount++; Continue[]];
+    testedCount++; Throw[Null, $dbcSkip]];
 
   (* Filter $dbcTreeMeta sentinel from state keys *)
   allStates = Sort @ Select[Keys[treeData], # =!= $dbcTreeMeta &];
@@ -510,9 +558,36 @@ Do[
         If[physFidelity,
            StringPadRight[m1Str, colM1] <> StringPadRight[m2Str, colM2], ""]];
 
-  writeProgress[$loopIdx],
+  writeProgress[$loopIdx];
+  (* Return True when MaxComponents is reached — signals the outer loop to stop *)
+  IntegerQ[maxComponents] && testedCount >= maxComponents,
 
-  {bitString, allBitStrings}];
+  $dbcSkip];  (* Catch tag — Throw[Null, $dbcSkip] acts as Continue[] in the outer loop *)
+
+(* ---- Dispatch: lazy (NGrid / ValidStateIDs) or eager (SeedBitStrings / 1D) ---- *)
+If[$useLazy,
+  (* Lazy path: iterate state IDs by grid-size block without materialising a list.
+     The outer Do steps through grid sizes; the inner Do steps through IDs in that block. *)
+  $lazyDone = False;
+  Do[
+    If[$lazyDone, Break[]];
+    Module[{L2 = $lazyGridL2s[[gIdx]], idStart, idStop},
+      idStart = $cLPre[L2];
+      idStop  = Min[maxVal, $cLPre[L2 + 1] - 1];
+      If[idStart > maxVal, Continue[]];   (* this grid size lies beyond maxVal *)
+      Do[
+        If[$lazyDone, Break[]];
+        $loopIdx++;
+        If[TrueQ[$loopBody[IntegerDigits[id, 2]]],
+          $lazyDone = True; Break[]],
+        {id, idStart, idStop}]],
+    {gIdx, Length[$lazyGridL2s]}],
+  (* Eager path: iterate the pre-materialised list (SeedBitStrings or non-2D enumeration).
+     TrueQ guards against the $dbcSkip symbol returned when Throw[] is caught. *)
+  Do[
+    $loopIdx++;
+    If[TrueQ[$loopBody[bitString]], Break[]],
+    {bitString, $eagerBitStrings}]];
 
 (* Final newline to clear progress bar before the summary *)
 If[verbose, WriteString[$Output, "\n"]];
@@ -533,6 +608,8 @@ If[ergoFailCount > 0,
 If[symFailCount == 0 && numFailCount == 0 && testedCount > 0,
   Print["All tested systems satisfy detailed balance."],
   If[testedCount == 0,
-    Print["No valid states found for the given MaxBitString."],
+    Print["No valid states found for the given parameters."],
     Print["*** DETAILED BALANCE VIOLATION DETECTED ***"]]];
+If[IntegerQ[maxComponents] && testedCount >= maxComponents,
+  Print["(Stopped after MaxComponents=", maxComponents, " -- further components not checked.)"]];
 Print[StringRepeat["=", totalCols]];
