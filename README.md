@@ -267,6 +267,26 @@ After `PiecewiseExpand`, DB expressions reduce to sums of `c·exp(−β·L)` ter
 
 Both checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (speedup ∝ translational symmetry) → threshold-based `ParallelMap`.
 
+### FastChecker internals: Piecewise case feasibility
+
+`$dbcCheckOneExpr` iterates Piecewise cases and checks each one under its *full* implicit condition (raw condition AND NOT all prior cases). A case can only contribute a violation if its full condition is satisfiable. This feasibility check (`$dbcFeasible`) previously used Mathematica's `Reduce` over the reals, which performs full quantifier elimination and is slow (~0.95 s) on conditions with `!=` constraints over 5+ real-valued variables — causing almost every expression to time out and fall back to `FullSimplify`.
+
+Two fixes applied:
+
+**Quick path.** A conjunction of pure `Unequal` atoms between distinct expressions is always satisfiable over the reals (each `a != b` constraint has a measure-1 solution set; no finite conjunction is infeasible). Detected in O(n) with pattern matching; returns True in under 2 ms.
+
+**`FindInstance` fallback.** For conditions that don't hit the quick path, `FindInstance` locates one example rather than characterising the full solution set. This is typically 10–100× faster than `Reduce` for polynomial inequality conditions.
+
+### FastChecker internals: implicit equality extraction
+
+When `FullSimplify` produces a simplified residual that the fast path still cannot decide, `$dbcCheckOneExpr` is re-run with `deepCheck=True` on the simplified expression. In this mode, `LogicalExpand` expands `Not[A ∧ B] → ¬A ∨ ¬B` before `Simplify`, exposing implicit equalities hidden inside negated conjunctions (e.g. `J₁ < J₂ ∧ J₃ = J₄` implied by elimination of prior cases). `$dbcSubstEqualities` then substitutes those equalities into the case value; algebraic cancellation confirms zero without further `FullSimplify` calls.
+
+This was required to avoid a false positive in `vmmc_continuous.wl` at NGrid=3: `FullSimplify` treated each Piecewise case independently and missed the implicit `J₂₃₁ = J₂₃₂` constraint implied by the prior-case exclusion, reporting 1296 spurious violations.
+
+### Performance: parallel FullSimplify
+
+When the fast check is inconclusive for many unique expressions, the `FullSimplify` fallback previously ran sequentially on the main kernel — the dominant bottleneck for large components. `CheckDetailedBalanceFast` now runs a second `ParallelMap` over all unique expressions needing `FullSimplify` before the violation scan, which then performs only fast Association lookups. Measured speedup for `vmmc_continuous.wl` at NGrid=3, 504-state component: 29 min → 12.5 min on 4 kernels.
+
 ---
 
 ## Physical fidelity metrics (`PhysFidelity=1`)

@@ -74,6 +74,7 @@ If[Length[posArgs] < 1,
   Print["  NSteps=N             MCMC steps per system (default 50000)"];
   Print["  MaxBitDepth=N        BFS depth cap (default 20)"];
   Print["  Verbose=True/False   Per-state BFS output (default False)"];
+  Print["  FailFast=1           Stop on first violation; print T, E, residual"];
   Exit[1]];
 
 (* ---- Option defaults ---- *)
@@ -83,6 +84,7 @@ nSteps          = 50000;
 maxBitDepth     = 20;
 verbose         = False;
 fastChecker     = False;   (* FastChecker=1: use Exp-polynomial fast path *)
+failFast        = False;   (* FailFast=1: stop+print debug info on first violation *)
 seedBitStrings  = None;    (* SeedBitStrings=X,Y: test specific bit strings *)
 physFidelity    = False;   (* PhysFidelity=1: compare T_MC to T_phys (Glauber) *)
 maxComponents   = Infinity; (* MaxComponents=N: stop after N distinct components *)
@@ -96,6 +98,7 @@ Do[
   If[StringMatchQ[opt, "MaxBitDepth="    ~~ __], maxBitDepth    = ToExpression[StringDrop[opt, 12]]];
   If[StringMatchQ[opt, "Verbose="        ~~ __], verbose        = ToExpression[StringDrop[opt,  8]]];
   If[StringMatchQ[opt, "FastChecker="    ~~ __], fastChecker    = (StringDrop[opt, 12] =!= "0")];
+  If[StringMatchQ[opt, "FailFast="       ~~ __], failFast       = (StringDrop[opt,  9] =!= "0")];
   If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")];
   If[StringMatchQ[opt, "MaxComponents="  ~~ __], maxComponents  = ToExpression[StringDrop[opt, 14]]];
   If[StringMatchQ[opt, "NGrid="          ~~ __], nGrid          = ToExpression[StringDrop[opt,  6]]],
@@ -141,6 +144,19 @@ If[ListQ[$checkerAbstractParams] && AllTrue[$checkerAbstractParams, StringQ],
     Print["ERROR: parameter remains bound after clearing: ", bound];
     Exit[1]];
   Print["Abstract params cleared: ", $checkerAbstractParams]];
+
+(* Build symbolic assumptions for abstract parameters from their saved numeric values.
+   A positive parameter (e.g. sigStep, physLen, epsLJ) gets {Element[sym,Reals], sym>0};
+   negative gets {Element[sym,Reals], sym<0}; zero gets {Element[sym,Reals]}.
+   These assumptions let FullSimplify apply real-valued identities (e.g. Erf[-x]=-Erf[x])
+   that are otherwise blocked when the parameter's sign is unknown. *)
+$abstractParamAssumptions = Flatten @ KeyValueMap[
+  Function[{name, val},
+    With[{sym = Symbol[name]},
+      Which[val > 0, {Element[sym, Reals], sym > 0},
+            val < 0, {Element[sym, Reals], sym < 0},
+            True,    {Element[sym, Reals]}]]],
+  $abstractParamRestore];
 
 (* ---- Validate required symbols ---- *)
 If[Length[DownValues[Algorithm]] == 0,
@@ -278,6 +294,8 @@ If[fastChecker && mode =!= "Numerical",
   Print["SymChecker:    FastChecker (Exp-polynomial; FullSimplify fallback)"],
   If[mode =!= "Numerical",
     Print["SymChecker:    FullSimplify (standard)"]]];
+If[failFast && mode =!= "Numerical",
+  Print["FailFast:      Enabled (stop on first violation, print debug info)"]];
 If[physFidelity, Print["PhysFidelity:  Enabled (T_phys Glauber; M1=EigRatio, M2=KLFidelity)"]];
 Print[StringRepeat["=", totalCols]];
 Print[];
@@ -405,17 +423,39 @@ $loopBody[bitString_List] := Catch[
     compNumericVars = Union[$staticSymVars, dynNumVars],
     compSymVars     = $staticSymVars;
     compNumericVars = $staticSymVars];
-  compSymAssumptions = Map[Element[#, Reals] &, Union[compSymVars, $fixedSymVars]];
+  compSymAssumptions = Join[
+    Map[Element[#, Reals] &, Union[compSymVars, $fixedSymVars]],
+    $abstractParamAssumptions];
 
   (* ---- Symbolic check ---- *)
   symResult = "-"; failStr = "-";
   If[mode =!= "Numerical",
     With[{viol = If[fastChecker,
-                  CheckDetailedBalanceFast[matrix, allStates, $energy, compSymAssumptions],
-                  CheckDetailedBalance[    matrix, allStates, $energy, compSymAssumptions]]},
+                  CheckDetailedBalanceFast[matrix, allStates, $energy, compSymAssumptions, failFast],
+                  CheckDetailedBalance[    matrix, allStates, $energy, compSymAssumptions, failFast]]},
       symResult = If[viol === {}, "PASS", "FAIL"];
       failStr   = If[viol === {}, "0",    ToString[Length[viol]]];
-      If[symResult === "PASS", symPassCount++, symFailCount++]]];
+      If[symResult === "PASS", symPassCount++, symFailCount++];
+      (* FailFast: print violation details and exit immediately *)
+      If[failFast && viol =!= {},
+        With[{v = viol[[1]],
+              $ds = If[Length[DownValues[DisplayState]] > 0, DisplayState, ToString]},
+          clearProgress[];
+          Print[];
+          Print["=== FAIL-FAST: first DB violation ==="];
+          Print["  Component seed: ", bitsStr, "  (", nStates, " states)"];
+          Print["  State 1 : ", $ds[v["pair"][[1]]]];
+          Print["  State 2 : ", $ds[v["pair"][[2]]]];
+          Print["  T(1->2) = ", v["tij"]];
+          Print["  T(2->1) = ", v["tji"]];
+          Print["  E(1)    = ", v["ei"]];
+          Print["  E(2)    = ", v["ej"]];
+          Print["  Residual (T(1->2)*Exp[-b*E1] - T(2->1)*Exp[-b*E2]) ="];
+          Print["    ", v["residual"]]];
+        Print[];
+        Print[StringRepeat["=", totalCols]];
+        Print["*** DETAILED BALANCE VIOLATION DETECTED (FailFast) ***"];
+        Exit[1]]]];
 
   (* ---- Numerical MCMC check ---- *)
   klStr = "-"; numResult = "-";

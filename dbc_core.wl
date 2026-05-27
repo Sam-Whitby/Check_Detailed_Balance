@@ -1036,15 +1036,36 @@ $dbcPWCases[pw_Piecewise] := Module[{cases, default},
 $dbcPWCases[other_] := {{other, True}}
 
 (* ---- Feasibility: can the case condition hold given β>0, free params?
-        Returns True, False, or $dbcFS (timed out / undecidable).       ---- *)
+        Returns True, False, or $dbcFS (timed out / undecidable).
+
+        Fast path: a conjunction of pure Unequal atoms (no Equal, no
+        trivially-false x!=x) is always satisfiable over unconstrained
+        reals — each Unequal constraint has a measure-1 solution set, so
+        any finite conjunction is non-empty.  Return True immediately.
+
+        Main path: FindInstance locates one solution without characterising
+        the full solution set, so it is typically 10–100× faster than
+        Reduce's quantifier elimination for the polynomial-inequality
+        conditions that arise from PiecewiseExpand on Boltzmann factors.
+        Especially important for conditions with != and Not[And[...]]
+        atoms where Reduce regularly exceeds its 0.5 s budget.      ---- *)
 $dbcFeasible[True,  _] := True
 $dbcFeasible[False, _] := False
-$dbcFeasible[cond_,  symParams_List] := Module[{res},
+$dbcFeasible[cond_,  symParams_List] := Module[{atoms, res},
+  (* Quick path: pure conjunction of Unequal atoms between distinct exprs.
+     Provably satisfiable over the reals without calling any solver. *)
+  atoms = Flatten[{cond} /. And -> List];
+  If[AllTrue[atoms, MatchQ[#, Unequal[_, _]] &] &&
+     !AnyTrue[atoms, MatchQ[#, Unequal[x_, x_]] &],
+     Return[True]];
+  (* FindInstance: finds one example — does not need to characterise the
+     full solution set so finishes much faster than Reduce on !=/ Not
+     conditions over 5+ real variables. *)
   res = Quiet @ TimeConstrained[
-    Reduce[cond && \[Beta] > 0, Append[symParams, \[Beta]], Reals],
+    FindInstance[cond && \[Beta] > 0, Append[symParams, \[Beta]], Reals],
     0.5, $dbcFS];
-  Which[res === False, False,
-        res === $dbcFS, $dbcFS,
+  Which[res === $dbcFS, $dbcFS,
+        res === {}, False,
         True, True]]
 
 (* ---- Normalise and merge Exp factors ---- *)
@@ -1123,26 +1144,69 @@ $dbcSubstEqualities[val_, cond_] := Module[
      val /. rules]]
 
 (* ---- Fast check for one DB expression.
-        Returns True (zero), False (non-zero), or $dbcFS (fall back).   ---- *)
-$dbcCheckOneExpr[expr_, assm_List, symParams_List] := Module[
-  {pw, cases},
-  pw    = PiecewiseExpand[expr, assm];
-  cases = $dbcPWCases[pw];
+        Returns True (zero), False (non-zero), or $dbcFS (fall back).
+
+        Key: tracks the accumulated prior-case condition so each case is
+        evaluated under its FULL implicit condition:
+          fullCond = rawCond AND NOT(all prior cases).
+        For the default case (rawCond = True): fullCond = NOT(all prior cases).
+        This lets $dbcSubstEqualities extract equalities implied by the exclusion
+        of prior cases (e.g. "both couplings equal" in a Piecewise default) and
+        lets per-case FullSimplify use those implied equalities as assumptions.  ---- *)
+(* deepCheck=False (default): fast mode used on original expressions.
+   deepCheck=True: enables Simplify[LogicalExpand[fullCond]] to expose equalities
+   hidden in Not[A&&B] conditions.  Only set True when called on an already-simplified
+   (FullSimplify output) expression — the Simplify call is too slow on raw VMMC exprs. *)
+$dbcCheckOneExpr[expr_, assm_List, symParams_List, deepCheck_: False] := Module[
+  {pw, cases, n, condSoFar, fullCond, val, rawCond, val2, z, fs},
+  pw        = PiecewiseExpand[expr, assm];
+  cases     = $dbcPWCases[pw];
+  n         = Length[cases];
+  condSoFar = False;   (* OR of all prior case conditions *)
   Catch[
-    Scan[Function[vc,
-      With[{val = vc[[1]], cond = vc[[2]]},
-        With[{feas = $dbcFeasible[cond, symParams]},
-          If[feas === False,   Return[]];          (* infeasible case: skip *)
-          If[feas === $dbcFS,  Throw[$dbcFS]];     (* can't decide: fall back *)
-          (* Substitute any equality constraints before the exponent check.
-             E.g. cond = (Jpair12 == 0) → substitute Jpair12→0 into val. *)
-          With[{val2 = $dbcSubstEqualities[val, cond]},
-            With[{z = $dbcIsExpZero[val2]},
-              Which[z === True,    Return[],          (* zero: continue *)
-                    z === $dbcFS,  Throw[$dbcFS],     (* can't decide: fall back *)
-                    True,          Throw[False]]]]]]],  (* non-zero found *)
-      cases];
-    True]]  (* every feasible case was zero *)
+    Do[
+      val     = cases[[k, 1]];
+      rawCond = cases[[k, 2]];
+      (* Compute full condition for this case *)
+      fullCond = Which[
+        condSoFar === False, rawCond,
+        rawCond   === True,  Not[condSoFar],            (* default case *)
+        True,                And[rawCond, Not[condSoFar]]];
+      condSoFar = If[condSoFar === False, rawCond, Or[condSoFar, rawCond]];
+      (* Fast-path: syntactically-zero value needs no feasibility check at all *)
+      If[$dbcIsExpZero[val] === True, Continue[]];
+      (* Deep-check branch: Simplify to expose equalities hidden in Not[A&&B].
+         LogicalExpand converts Not[A&&B]→!A||!B; Simplify then eliminates
+         contradictory branches (e.g. x<y && x==y → False).
+         Returning non-False proves feasibility — skip $dbcFeasible (which times
+         out on !=‑conditions over 5+ real variables).
+         Only used when deepCheck=True (i.e. expr is already FullSimplify output). *)
+      If[TrueQ[deepCheck] && !FreeQ[fullCond, Not | Or],
+        fullCond = Simplify[LogicalExpand[fullCond], assm];
+        If[fullCond === False, Continue[]];
+        val2 = $dbcSubstEqualities[val, fullCond];
+        z    = $dbcIsExpZero[val2];
+        Which[
+          z === True,    Null,
+          z === $dbcFS,
+            fs = FullSimplify[val2, Append[assm, fullCond]];
+            If[fs =!= 0, Throw[False]],
+          True, Throw[False]];
+        Continue[]];  (* this case handled; advance to next *)
+      (* Standard branch: use $dbcFeasible *)
+      With[{feas = $dbcFeasible[fullCond, symParams]},
+        If[feas === False,   Continue[]];    (* infeasible under full cond: skip *)
+        If[feas === $dbcFS,  Throw[$dbcFS]]; (* can't decide feasibility: outer fallback *)
+        val2 = $dbcSubstEqualities[val, fullCond];
+        z    = $dbcIsExpZero[val2];
+        Which[
+          z === True,    Null,                (* zero: continue to next case *)
+          z === $dbcFS,                       (* algebraic inconclusive: per-case FullSimplify *)
+            fs = FullSimplify[val2, Append[assm, fullCond]];
+            If[fs =!= 0, Throw[False]],
+          True, Throw[False]]],              (* algebraic non-zero: violation *)
+      {k, n}];
+    True]]  (* every case was zero under its full condition *)
 
 (* ================================================================
    CheckDetailedBalanceFast
@@ -1198,12 +1262,13 @@ $dbcFastWorker[expr_, assm_, symParams_] :=
   {$dbcCheckOneExpr[expr, assm, symParams], expr, assm}
 
 CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
-                         extraAssumptions_List : {}] := Module[
+                         extraAssumptions_List : {}, failFast_ : False] := Module[
   {n, pairs, assm, symParams, exprs,
    nonTrivIdx, ntExprs, ntPairs,
    uniqueIdxs, canonIdx, uniqueExprs, uniqueResults, idxToResult,
-   results, violations, fsCache, nK,
-   si, sj, tij, tji, ei, ej, fRes},
+   results, violations, fsCache, recheckCache, nK,
+   fsNeedPos, fsNeedIdx, fsNeedExprs, fsResults,
+   si, sj, tij, tji, ei, ej, fRes, expr, simp},
 
   n         = Length[allStates];
   pairs     = Flatten[Table[{i, j}, {i, 1, n}, {j, i+1, n}], 1];
@@ -1211,6 +1276,33 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
 
   assm      = Join[{\[Beta] > 0}, extraAssumptions];
   symParams = Cases[extraAssumptions, Element[x_, Reals] :> x, Infinity];
+
+  (* FailFast: sequential scan, stop at first violation, return debug fields *)
+  If[TrueQ[failFast],
+    Do[
+      si   = allStates[[pairs[[k, 1]]]]; sj = allStates[[pairs[[k, 2]]]];
+      tij  = Lookup[matrix, Key[{si, sj}], 0];
+      tji  = Lookup[matrix, Key[{sj, si}], 0];
+      ei   = symEnergy[si] /. r_Real :> Rationalize[r];
+      ej   = symEnergy[sj] /. r_Real :> Rationalize[r];
+      expr = tij * Exp[-\[Beta] * ei] - tji * Exp[-\[Beta] * ej];
+      If[expr =!= 0,
+        fRes = $dbcCheckOneExpr[expr, assm, symParams];
+        If[fRes =!= True,
+          simp = FullSimplify[PiecewiseExpand[expr], Assumptions -> assm];
+          If[simp =!= 0 && $dbcCheckOneExpr[simp, assm, symParams, True] === True,
+            simp = 0];
+          If[simp =!= 0,
+            Return[{<|"pair"     -> {si, sj},
+                      "residual" -> simp,
+                      "tij"      -> tij,
+                      "tji"      -> tji,
+                      "ei"       -> ei,
+                      "ej"       -> ej|>},
+                   Module]]]],
+      {k, Length[pairs]}];
+    Return[{}]];
+
 
   (* Build all expressions on main kernel — symEnergy may not be on subkernels *)
   exprs = Map[
@@ -1233,8 +1325,7 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
   {uniqueIdxs, canonIdx} = $dbcDedup[ntExprs];
   uniqueExprs = ntExprs[[uniqueIdxs]];
 
-  (* B+C: ParallelMap for natural load balancing; sequential when the workload
-          is too small to justify the dispatch overhead. *)
+  (* B+C: Fast-check phase — ParallelMap over all unique expressions. *)
   nK = Length[Kernels[]];
   With[{a = assm, sp = symParams},
     uniqueResults = If[nK > 0 && Length[uniqueExprs] > nK,
@@ -1244,9 +1335,26 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
   idxToResult = AssociationThread[uniqueIdxs -> uniqueResults];
   results = Map[Function[k, idxToResult[canonIdx[[k]]]], Range[Length[ntExprs]]];
 
-  (* Collect violations; fall back to FullSimplify once per unique expression. *)
-  fsCache    = <||>;
-  violations = {};
+  (* D: FullSimplify fallback — parallelise over unique expressions whose
+        fast check was inconclusive ($dbcFS) or flagged a possible violation.
+        All FullSimplify work is done here in parallel; the violation scan
+        below is then a series of fast Association lookups.
+        Key: FullSimplify is called on the ORIGINAL expression (not a
+        pre-simplified one) — same semantics as the old sequential code. *)
+  fsNeedPos  = Select[Range[Length[uniqueIdxs]], uniqueResults[[#, 1]] =!= True &];
+  fsNeedIdx  = uniqueIdxs[[fsNeedPos]];
+  fsNeedExprs = ntExprs[[fsNeedIdx]];
+  With[{a = assm},
+    fsResults = If[nK > 0 && Length[fsNeedExprs] > nK,
+      ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fsNeedExprs],
+      Map[       FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fsNeedExprs]]];
+  fsCache = AssociationThread[fsNeedIdx -> fsResults];
+
+  (* E: Violation scan — fsCache already populated; no FullSimplify here.
+        recheckCache applies deepCheck=True to any non-zero FullSimplify
+        result, catching false positives from implicit Piecewise conditions. *)
+  recheckCache = <||>;
+  violations   = {};
   Do[
     With[{fRes = results[[k, 1]],
           pair = ntPairs[[k]],
@@ -1255,13 +1363,13 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
         fRes === True,
           Null,
         True,
-          If[!KeyExistsQ[fsCache, cidx],
-            fsCache[cidx] = FullSimplify[
-              PiecewiseExpand[ntExprs[[cidx]]], Assumptions -> assm]];
           If[fsCache[cidx] =!= 0,
-            AppendTo[violations,
-              <|"pair"     -> {allStates[[pair[[1]]]], allStates[[pair[[2]]]]},
-                "residual" -> fsCache[cidx]|>]]]],
+            If[!KeyExistsQ[recheckCache, cidx],
+              recheckCache[cidx] = $dbcCheckOneExpr[fsCache[cidx], assm, symParams, True]];
+            If[recheckCache[cidx] =!= True,
+              AppendTo[violations,
+                <|"pair"     -> {allStates[[pair[[1]]]], allStates[[pair[[2]]]]},
+                  "residual" -> fsCache[cidx]|>]]]]],
     {k, Length[ntExprs]}];
 
   violations
@@ -1275,14 +1383,44 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
    Returns list of violation records; empty list = PASS.
    ---------------------------------------------------------------- *)
 CheckDetailedBalance[matrix_Association, allStates_List, symEnergy_,
-                     extraAssumptions_List : {}] := Module[
-  {n = Length[allStates], pairs, exprs,
+                     extraAssumptions_List : {}, failFast_ : False] := Module[
+  {n = Length[allStates], pairs, assm, symParams, exprs,
    nonTrivIdx, ntExprs, ntPairs,
    uniqueIdxs, canonIdx, uniqueExprs, uniqueResults, idxToResult,
-   results, violations, nK},
+   results, violations, recheckCache, nK,
+   si, sj, tij, tji, ei, ej, expr, simp},
 
   pairs = Flatten[Table[{i, j}, {i, 1, n}, {j, i + 1, n}], 1];
   If[Length[pairs] == 0, Return[{}]];
+
+  assm      = Join[{\[Beta] > 0}, extraAssumptions];
+  symParams = Cases[extraAssumptions, Element[x_, Reals] :> x, Infinity];
+
+  (* FailFast: sequential scan, stop at first violation, return debug fields *)
+  If[TrueQ[failFast],
+    Do[
+      si   = allStates[[pairs[[k, 1]]]]; sj = allStates[[pairs[[k, 2]]]];
+      tij  = Lookup[matrix, Key[{si, sj}], 0];
+      tji  = Lookup[matrix, Key[{sj, si}], 0];
+      ei   = symEnergy[si] /. r_Real :> Rationalize[r];
+      ej   = symEnergy[sj] /. r_Real :> Rationalize[r];
+      expr = tij * Exp[-\[Beta] * ei] - tji * Exp[-\[Beta] * ej];
+      If[expr =!= 0,
+        simp = FullSimplify[PiecewiseExpand[expr], Assumptions -> assm];
+        (* Recheck: FullSimplify may not use implicit Piecewise case conditions;
+           $dbcCheckOneExpr tracks full per-case conditions, so if it proves zero, accept it. *)
+        If[simp =!= 0 && $dbcCheckOneExpr[simp, assm, symParams, True] === True,
+          simp = 0];
+        If[simp =!= 0,
+          Return[{<|"pair"     -> {si, sj},
+                    "residual" -> simp,
+                    "tij"      -> tij,
+                    "tji"      -> tji,
+                    "ei"       -> ei,
+                    "ej"       -> ej|>},
+                 Module]]],
+      {k, Length[pairs]}];
+    Return[{}]];
 
   (* Build all expressions on the MAIN kernel — symEnergy is only called here.
      The results are pure symbolic data safe to send to remote kernels. *)
@@ -1309,20 +1447,31 @@ CheckDetailedBalance[matrix_Association, allStates_List, symEnergy_,
   (* B+C: ParallelMap for natural per-expression load balancing; sequential
           when the workload is too small to justify the dispatch overhead. *)
   nK = Length[Kernels[]];
-  With[{assm = Join[{\[Beta] > 0}, extraAssumptions]},
-    uniqueResults = If[nK > 0 && Length[uniqueExprs] > nK,
-      ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> assm] &, uniqueExprs],
-      Map[        FullSimplify[PiecewiseExpand[#], Assumptions -> assm] &, uniqueExprs]]];
+  uniqueResults = If[nK > 0 && Length[uniqueExprs] > nK,
+    ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> assm] &, uniqueExprs],
+    Map[        FullSimplify[PiecewiseExpand[#], Assumptions -> assm] &, uniqueExprs]];
 
   idxToResult = AssociationThread[uniqueIdxs -> uniqueResults];
   results = Map[Function[k, idxToResult[canonIdx[[k]]]], Range[Length[ntExprs]]];
 
-  violations = {};
+  (* Collect violations; recheck FullSimplify non-zero results with $dbcCheckOneExpr.
+     FullSimplify may not correctly use the implicit Piecewise case conditions
+     (e.g. the default case's negated condition).  $dbcCheckOneExpr tracks full
+     per-case conditions and can prove zero where FullSimplify fails.
+     Critical: we apply $dbcCheckOneExpr to the SIMPLIFIED expression (FullSimplify
+     output), not the original.  The simplified form has a clean Piecewise structure
+     that $dbcFeasible can handle; the original complex VMMC expression times out. *)
+  recheckCache = <||>;
+  violations   = {};
   Do[
     If[results[[k]] =!= 0,
-      AppendTo[violations,
-        <|"pair"     -> {allStates[[ntPairs[[k, 1]]]], allStates[[ntPairs[[k, 2]]]]},
-          "residual" -> results[[k]]|>]],
+      With[{cidx = canonIdx[[k]]},
+        If[!KeyExistsQ[recheckCache, cidx],
+          recheckCache[cidx] = $dbcCheckOneExpr[idxToResult[cidx], assm, symParams, True]];
+        If[recheckCache[cidx] =!= True,
+          AppendTo[violations,
+            <|"pair"     -> {allStates[[ntPairs[[k, 1]]]], allStates[[ntPairs[[k, 2]]]]},
+              "residual" -> results[[k]]|>]]]],
     {k, Length[ntExprs]}];
   violations
 ]
