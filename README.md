@@ -221,6 +221,7 @@ wolframscript -file animate.wls examples3/vmmc_2d_field.wl \
 | `kawasaki_2d.wl` | 2D Kawasaki on a periodic square lattice | PASS | PASS |
 | `vmmc_2d_field.wl` | VMMC with user-defined field and coupling functions | PASS | PASS |
 | `vmmc_continuous.wl` | VMMC with Gaussian proposal, LJ energy; three-file structure | PASS | PASS |
+| `vmmc_lattice.wl` | VMMC with uniform-box displacement (no Gaussian/Erfc); checker-friendly, converges to continuous limit for large physLen | PASS | PASS |
 | `jump_1d_weighted.wl` | 1D jump dynamics using `RandomChoice[weights → ...]` | PASS | PASS |
 | `kawasaki_1d_fail.wl` | Sign-reversed dE in Metropolis | FAIL | PASS |
 | `kawasaki_1d_nonergodic.wl` | Only type-1 particles move; type-2+ frozen | PASS | FAIL |
