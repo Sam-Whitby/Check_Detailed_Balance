@@ -59,7 +59,7 @@
 
 (* Particle diameter in lattice units.  Sets the LJ length scale:
      sigLJ = physLen   (LJ zero-crossing = one particle diameter)
-     LJ minimum at d² = 2^(1/3)·physLen²
+     LJ minimum at d² = 2^(1/3)·physLen²  ≈ 1.26·physLen²
    physLen=1: LJ zero-crossing at the nearest-neighbour distance d²=1;
    energies ~O(1) kT on checker lattices (3×3 etc.).  For production
    runs on fine-grained grids, increase physLen (e.g. physLen=5 for a
@@ -69,16 +69,22 @@ physLen = 1
 (* LJ well depth in kT units. *)
 epsLJ = 1
 
+(* Inverse temperature for numerical MCMC.  sigStep is derived from this. *)
+numBeta = 1
+
 sigLJ := physLen     (* delayed: always reflects current physLen *)
 
 (* Displacement proposal std dev: one BD timestep at the natural LJ timescale
    (m=1, γ=1).  Override sigStep directly to tune acceptance rate. *)
-sigStep := physLen * Sqrt[2.0 / (numBeta * epsLJ)]   (* delayed: tracks physLen changes *)
+sigStep := physLen * Sqrt[2.0 / (numBeta * epsLJ)]   (* delayed: tracks physLen/numBeta/epsLJ *)
 
 (* Interaction cutoff.
    $maxD2 = Infinity: include all pairs; correct for symbolic check (small
    lattices have finitely many pairs anyway).
-   Override for production runs: $maxD2 = Ceiling[2*physLen^2]. *)
+   For production runs set $maxD2 = Ceiling[2*physLen^2], which places the
+   cutoff just past the LJ minimum at d²=2^(1/3)·physLen²≈1.26·physLen².
+   The standard 2.5σ cutoff (capturing the full attractive tail) requires
+   $maxD2 = Ceiling[6.25*physLen^2]; use this for more accurate LJ physics. *)
 $maxD2 = Infinity
 
 (* ---- Checker interface ---- *)
@@ -165,7 +171,7 @@ $torusD2[s1_, s2_, nGrid_] :=
 
 
 (* ================================================================
-   SECTION 4 — Interaction shells   (memoised)
+   SECTION 3 — Interaction shells   (memoised)
    ================================================================ *)
 
 (* All sites within squared distance $maxD2 of site s on nGrid torus.
@@ -180,18 +186,9 @@ $neighborsD2[s_, nGrid_] := $neighborsD2[s, nGrid] =
                         {dr, -rMax, rMax}, {dc, -rMax, rMax}],
         Function[q, q =!= s && $torusD2[s, q, nGrid] <= $maxD2]]]]
 
-(* All unique undirected bonds {s1, s2, d2} with s1<s2, d2≤$maxD2 *)
-$uniqueBondsExt[nGrid_] := $uniqueBondsExt[nGrid] =
-  Flatten[
-    Table[
-      With[{d2 = $torusD2[s1, s2, nGrid]},
-        If[d2 > 0 && d2 <= $maxD2, {{s1, s2, d2}}, {}]],
-      {s1, nGrid^2}, {s2, s1 + 1, nGrid^2}],
-    2]
-
 
 (* ================================================================
-   SECTION 5 — Energy
+   SECTION 4 — Energy
    ================================================================ *)
 
 (* Total pair energy: sum of couplingJ over all bonds within $maxD2.
@@ -213,7 +210,7 @@ energy[state_List] :=
 
 
 (* ================================================================
-   SECTION 6 — Virtual pair energy for VMMC link weights
+   SECTION 5 — Virtual pair energy for VMMC link weights
    ================================================================
 
    Energy between a particle of type typeI at virtual site vI and a
@@ -232,7 +229,7 @@ $virtualPairEnergy[typeI_, typeJ_, vI_, qSite_, nGrid_] :=
 
 
 (* ================================================================
-   SECTION 7 — VMMC cluster builder
+   SECTION 6 — VMMC cluster builder
    ================================================================
 
    Whitelam-Geissler link-weight logic, generalised to K directions
@@ -315,7 +312,7 @@ $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
 
 
 (* ================================================================
-   SECTION 8 — Algorithm
+   SECTION 7 — Algorithm
    ================================================================
 
    One VMMC step with Gaussian displacement proposal:
@@ -361,7 +358,7 @@ Algorithm[state_List] :=
 
 
 (* ================================================================
-   SECTION 9 — Dynamic symbolic parameters
+   SECTION 8 — Dynamic symbolic parameters
    ================================================================
 
    Returns the symbolic coupling atoms that appear in this component's
@@ -394,7 +391,7 @@ DynamicSymParams[states_List] :=
 
 
 (* ================================================================
-   SECTION 10 — Checker interface   (identical to vmmc_2d_field.wl)
+   SECTION 9 — Checker interface   (identical to vmmc_2d_field.wl)
    ================================================================ *)
 
 BitsToState[bits_List] :=
@@ -418,5 +415,3 @@ ValidStateIDs[maxId_Integer] :=
       ids = Join[ids, Range[$cLPre[L^2], Min[$cLPre[L^2 + 1] - 1, maxId]]];
       L++];
     ids]
-
-numBeta = 1

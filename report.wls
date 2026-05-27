@@ -108,6 +108,23 @@ If[Length[DownValues[BitsToState]] == 0,
 If[!ValueQ[numBeta] || !NumericQ[numBeta],
   Print["ERROR: 'numBeta' (numeric) not defined in ", posArgs[[1]]]; Exit[1]];
 
+(* ---- Clear abstract parameters declared by the algorithm file ----
+   Mirrors the same block in check.wls.  Without this, parameters such as
+   sigStep retain their concrete float values, causing FullSimplify to fail
+   to cancel the Gaussian weight factors in the symbolic DB check. *)
+$abstractParamRestore = <||>;
+If[ListQ[$checkerAbstractParams] && AllTrue[$checkerAbstractParams, StringQ],
+  $abstractParamRestore = Association @ Flatten @ Map[
+    Function[name,
+      With[{val = Symbol[name]},
+        If[NumericQ[val], {name -> val}, {}]]],
+    $checkerAbstractParams];
+  Scan[ClearAll, $checkerAbstractParams];
+  bound = Select[$checkerAbstractParams, ToExpression["ValueQ[" <> # <> "]"] &];
+  If[bound =!= {},
+    Print["ERROR: parameter remains bound after clearing: ", bound]; Exit[1]];
+  Print["Abstract params cleared: ", $checkerAbstractParams]];
+
 $alg     = Algorithm;
 $energy  = energy;
 $numBeta = numBeta;
@@ -208,7 +225,10 @@ If[printMatrix,
 (* ---- Numerical MCMC check (skipped if DoNumerical=False) ---- *)
 If[doNumerical,
   Print["Running numerical MCMC (", nSteps, " steps) ..."];
-  allBlockVars = Union[compNumericVars, $fixedSymVars];
+  $restoreSyms     = Map[Symbol, Keys[$abstractParamRestore]];
+  $restoreVals     = Values[$abstractParamRestore];
+  allBlockVars     = Union[compNumericVars, $fixedSymVars];
+  allBlockVarsFull = Union[allBlockVars, $restoreSyms];
   $runNumericalMCMC[] := (
     mcmcCounts = RunNumericalMCMCAT[allStates, $alg, $numBeta, "NSteps" -> nSteps];
     bw = BoltzmannWeightsAT[allStates, $energy, $numBeta]);
@@ -221,12 +241,13 @@ If[doNumerical,
           couplingJ[a_Integer, b_Integer, d2_Integer] := $couplingJConcrete[a, b, d2]];
         $runNumericalMCMC[]],
       $runNumericalMCMC[]];
-  If[allBlockVars =!= {},
+  If[allBlockVarsFull =!= {},
     SeedRandom[42];
     compNumVals = If[compNumericVars =!= {}, RandomReal[{-1, 1}, Length[compNumericVars]], {}];
-    Block[Evaluate[allBlockVars],
+    Block[Evaluate[allBlockVarsFull],
       If[compNumericVars =!= {}, MapThread[Set, {compNumericVars, compNumVals}]];
       If[$fixedSymVars =!= {}, MapThread[Set, {$fixedSymVars, $fixedNumVals}]];
+      If[$restoreSyms =!= {}, MapThread[Set, {$restoreSyms, $restoreVals}]];
       $activateAndRun[]],
     $activateAndRun[]];
   simFreq = N[# / Total[mcmcCounts]] & /@ mcmcCounts;
