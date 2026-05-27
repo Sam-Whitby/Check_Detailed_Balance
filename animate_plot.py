@@ -339,29 +339,32 @@ def main():
     # Use frames=None (infinite counter) so FuncAnimation never auto-stops
     # its timer.  On macOS/Tkinter, having the timer stop itself (repeat=False)
     # races with the Tk event loop teardown and causes a SIGSEGV inside
-    # mach_vm_allocate_kernel.  Instead we clamp the frame index to the last
-    # frame so the display freezes after all frames are shown, and we let the
-    # user close the window explicitly.  blit is always False to avoid the
-    # extra blitting code path that triggers the same crash on some macOS
-    # matplotlib builds.
+    # mach_vm_allocate_kernel.  Instead, once the first post-end frame fires
+    # we call os._exit(0) ourselves — before the timer can self-terminate —
+    # which bypasses all GC teardown and avoids the crash.  blit is always
+    # False to avoid the extra blitting code path that triggers the same crash
+    # on some macOS matplotlib builds.
     def update(frame: int):
-        i = min(frame, n_frames - 1)   # freeze on last frame once done
+        # After the last real frame, exit cleanly instead of freezing forever.
+        # os._exit bypasses Python/Tk teardown (which causes SIGSEGV on macOS
+        # when the timer tries to stop itself with repeat=False).
+        if frame >= n_frames:
+            os._exit(0)
 
-        im.set_data(to_grid(states[i]))
-        ax_grid.set_title(f"Step {steps[i]}", fontsize=10)
+        im.set_data(to_grid(states[frame]))
+        ax_grid.set_title(f"Step {steps[frame]}", fontsize=10)
 
-        if frame < n_frames:
-            xs.append(steps[i])
-            ys.append(energies[i])
-            e_line.set_data(xs, ys)
-            e_dot.set_data([xs[-1]], [ys[-1]])
-            e_text.set_text(f"E = {energies[i]:.4f}")
+        xs.append(steps[frame])
+        ys.append(energies[frame])
+        e_line.set_data(xs, ys)
+        e_dot.set_data([xs[-1]], [ys[-1]])
+        e_text.set_text(f"E = {energies[frame]:.4f}")
 
         return im, e_line, e_dot, e_text
 
     ani = animation.FuncAnimation(
         fig, update,
-        frames=None,        # infinite — timer never auto-stops
+        frames=None,        # infinite — timer never auto-stops (repeat=False crashes macOS)
         interval=delay_ms,
         blit=False,         # avoid blit teardown crash on macOS
         cache_frame_data=False)

@@ -1,0 +1,217 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{microtype}
+\geometry{margin=2.5cm}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+
+\title{Symmetry Reduction in the Detailed Balance Checker\\[0.4em]
+\large Why Geometric Symmetry Gives a $|G|$-fold Speedup}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{What the checker currently does}
+
+The checker verifies \emph{detailed balance} (DB) for every pair of states
+$(s_i, s_j)$ in a connected component:
+\[
+  T(s_i \to s_j)\,\pi(s_i) \;=\; T(s_j \to s_i)\,\pi(s_j),
+  \qquad \pi(s) \propto e^{-\beta E(s)}.
+\]
+For a component with $N$ states this requires evaluating $\binom{N}{2} =
+N(N-1)/2$ symbolic expressions.  For the VMMC \texttt{vmmc\_lattice.wl}
+example at NGrid\,=\,3 this is roughly $504 \times 503/2 \approx 126{,}000$
+pairs (most trivially zero due to sparse connectivity, but the symbolic
+work is dominated by the $\sim$thousands of non-trivial ones).  The current
+runtime is around three minutes.
+
+\section{The symmetry group of the algorithm}
+
+\begin{definition}[G-invariance of the transition kernel]
+  Let $G$ be a group acting on the state space $\mathcal{S}$.  The transition
+  kernel $T$ is \emph{$G$-invariant} if
+  \[
+    T(g \cdot s \to g \cdot s') \;=\; T(s \to s')
+    \quad \forall\, g \in G,\; s, s' \in \mathcal{S}.
+  \]
+  The energy is $G$-invariant if $E(g \cdot s) = E(s)$ for all $g, s$,
+  which implies $\pi(g \cdot s) = \pi(s)$.
+\end{definition}
+
+For algorithms on a periodic $L \times L$ square lattice, two natural
+symmetry groups arise.
+
+\begin{itemize}
+\item \textbf{Translations.}
+  $G = \mathbb{Z}_L \times \mathbb{Z}_L$, $|G| = L^2$.  The group element
+  $(a,b)$ shifts every site $(r,c) \mapsto (r+a, c+b) \bmod L$.  A VMMC
+  or Kawasaki algorithm is translation-invariant whenever the energy depends
+  only on pairwise distances (not absolute positions) and the proposal
+  distribution is spatially uniform.  Both conditions hold for
+  \texttt{vmmc\_lattice.wl}.
+
+\item \textbf{Full square symmetry (D4 $\times$ translations).}
+  If the algorithm is also invariant under the 8 rotations and reflections
+  of the square, $|G| = 8L^2$.
+\end{itemize}
+
+\noindent
+For concreteness we focus on translations ($|G| = L^2$); every argument
+applies unchanged to larger groups.
+
+\section{Why G-invariance reduces the number of pairs to check}
+
+\begin{theorem}[Pair-orbit reduction]
+  Suppose $T$ and $E$ are both $G$-invariant and $G$ acts freely on
+  $\mathcal{S}$ (no non-identity element fixes any state).  Then DB holds
+  for all $N(N-1)/2$ pairs if and only if it holds for a set of
+  representative pairs — one from each $G$-orbit of unordered pairs.
+  The number of such orbits is
+  \[
+    \frac{N(N-1)}{2\,|G|}.
+  \]
+\end{theorem}
+
+\begin{proof}
+  The $G$-orbit of an unordered pair $\{s, s'\}$ is the set
+  $\{\{g \cdot s,\; g \cdot s'\} : g \in G\}$.
+  Under a free action, all $|G|$ images are distinct, so each orbit has
+  exactly $|G|$ elements.  Since every pair belongs to exactly one orbit,
+  the total number of orbits is $\binom{N}{2}/|G| = N(N-1)/(2|G|)$.
+
+  \smallskip
+  \noindent
+  \emph{Sufficiency.}
+  Suppose DB holds for a representative pair $\{s_1, s_2\}$.
+  For any $g \in G$:
+  \begin{align*}
+    T(g \cdot s_1 \to g \cdot s_2)\,\pi(g \cdot s_1)
+    &= T(s_1 \to s_2)\,\pi(s_1) \\
+    &= T(s_2 \to s_1)\,\pi(s_2) \\
+    &= T(g \cdot s_2 \to g \cdot s_1)\,\pi(g \cdot s_2),
+  \end{align*}
+  where the outer equalities use $G$-invariance of $T$ and $\pi$.
+  Hence DB holds for every pair in the orbit.
+
+  \smallskip
+  \noindent
+  \emph{Necessity.}
+  DB for the orbit member $(g \cdot s_1, g \cdot s_2)$ immediately implies
+  DB for $(s_1, s_2)$ by the same argument with $g$ replaced by $g^{-1}$.\qed
+\end{proof}
+
+\begin{corollary}[Speedup factor]
+  With $G$-invariance the checker needs to evaluate exactly $\mathbf{1/|G|}$
+  as many symbolic DB expressions.  The speedup is $|G|$.
+\end{corollary}
+
+\section{Quantitative impact}
+
+\subsection*{For NGrid = 3 with translational symmetry}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Quantity & Without symmetry & With translations ($|G|=9$) \\
+\midrule
+States in component & 504 & 504 \\
+DB pairs to check & 126,756 & 14,084 \\
+Unique symbolic expressions & $\sim$3,000 & $\sim$333 \\
+Estimated runtime & 3 min & $\sim$20 sec \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{With full D4 + translations ($|G| = 72$)}
+\vspace{-0.3em}
+For a $3\times 3$ torus the full symmetry group (8 rotations/reflections
+$\times$ 9 translations) has order 72.  The same $504$-state component
+would require only $126{,}756/72 \approx 1{,}760$ pair checks and an
+estimated runtime of $\sim 2{-}3$ seconds.
+
+\medskip
+For NGrid\,=\,6 ($N \approx 100{,}000$ states) the untreated checker would
+require $\sim 5 \times 10^9$ pairs — computationally infeasible — whereas
+with $|G| = 36$ (translations) this reduces to $\sim 1.4 \times 10^8$
+pairs, and with $|G| = 288$ (D4 + translations) to $\sim 1.7 \times 10^7$.
+
+\section{The user's concern: what about transitions \emph{within} an orbit?}
+
+The key objection is: two states in the \emph{same} G-orbit can transition
+to each other (e.g.\ a particle cluster translating to a
+symmetry-equivalent configuration).  Do we not need to check those pairs
+independently?
+
+\smallskip
+\noindent
+The answer is that such pairs are \emph{included} in the orbit-reduction
+count — they are not a special exception.
+
+\medskip
+Consider two states in the same orbit: $s_1 = c$ (the canonical
+representative) and $s_2 = h \cdot c$ for some $h \neq e$.  This is still
+a valid unordered pair $\{c, h \cdot c\}$, and its $G$-orbit is
+$\{\{g \cdot c,\; g h \cdot c\} : g \in G\}$, which has $|G|$ elements
+(under a free action).  DB for this pair reads
+\[
+  T(c \to h \cdot c)\,\pi(c) = T(h \cdot c \to c)\,\pi(h \cdot c).
+\]
+By $G$-invariance of $\pi$ this simplifies to
+\begin{equation}
+  T(c \to h \cdot c) \;=\; T(h \cdot c \to c) \;=\; T(c \to h^{-1} \cdot c),
+  \label{eq:intra}
+\end{equation}
+where the second equality uses $G$-invariance of $T$ (apply $h^{-1}$ to both
+states).  Equation~\eqref{eq:intra} is a \emph{proposal-symmetry} condition:
+the probability of moving the cluster by group element $h$ must equal the
+probability of the inverse move $h^{-1}$.
+
+For any algorithm whose displacement proposal satisfies $P(\mathbf{d}) =
+P(-\mathbf{d})$ — which is true by construction for \texttt{vmmc\_lattice.wl}
+(the uniform-box list contains $\mathbf{d}$ and $-\mathbf{d}$ as a pair) —
+equation~\eqref{eq:intra} holds automatically.  These intra-orbit DB
+conditions therefore require \emph{no additional checking}: they are
+guaranteed by the same proposal-symmetry argument that underlies the VMMC
+detailed-balance proof.
+
+Even without that argument: intra-orbit pairs number at most
+$M \cdot |G|(|G|-1)/2 \approx N|G|/2 = O(N)$, whereas inter-orbit pairs
+number $M(M-1)|G|^2/2 \approx N^2/(2|G|) = O(N^2)$.  For large $N$ the
+intra-orbit contribution is negligible, and the dominant $O(N^2)$ cost still
+shrinks by exactly $|G|$.
+
+\section{What implementation is needed}
+
+Three components are required to realise the speedup in practice.
+
+\begin{enumerate}
+\item \textbf{Verify $G$-invariance.}  For each canonical seed $c$, compare
+  the BFS output (transition probabilities from $c$) with the BFS output
+  from a non-canonical orbit member $g \cdot c$.  G-invariance holds iff the
+  two outputs agree after applying $g^{-1}$ to all successor states.  This
+  is an exact symbolic check with negligible overhead.
+
+\item \textbf{Canonicalise states.}  Map each state to the lexicographically
+  smallest member of its G-orbit before adding it to the ``already seen''
+  set.  Only one BFS is run per orbit; BFS from $g \cdot c$ is replaced by
+  looking up the result for $c$ and applying $g$.
+
+\item \textbf{Check one pair per G-orbit.}  For each pair of canonical
+  representatives $(c_i, c_j)$, check only the pair $(c_i, c_j)$ itself
+  (or any single orbit representative).  The $|G|-1$ other pairs in the
+  same orbit are certified by Theorem 1 without additional computation.
+\end{enumerate}
+
+\noindent
+None of these steps changes the \emph{algebraic} content of the DB check;
+they reduce the \emph{number of times} it is performed.
+
+\end{document}
