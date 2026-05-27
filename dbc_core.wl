@@ -2177,3 +2177,138 @@ $decode[id_Integer] :=
     pos  = $unrankCombo[rpos, L, N]; perm  = $unrankPerm[rperm, N];
     arr  = ConstantArray[0, L];
     Do[arr[[pos[[i]] + 1]] = perm[[i]], {i, N}]; arr]
+
+
+(* ================================================================
+   PHYSICAL TRANSITION MATRIX AND FIDELITY METRICS
+   ================================================================
+   BuildTPhys constructs the exact physical (Glauber) single-particle
+   transition matrix for a 2D periodic square-lattice system.
+
+   For each ordered state pair (si, sj) differing by exactly one
+   nearest-neighbor particle hop (d²=1):
+     T_phys(i→j) = (1/N) * (1/z) * 1/(1 + exp(β·ΔE))
+   where N = particle count, z = 4 (2D coordination number),
+   ΔE = energy(sj) − energy(si).  Diagonal entries make rows sum to 1.
+
+   T_phys is the reference for "correct" physical kinetics.  Comparing
+   T_MC (from BFS) to T_phys gives two fidelity metrics:
+
+   Metric 1 — Eigenvalue spectrum ratio (timescale hierarchy):
+     M1 = |λ₂^MC/λ₃^MC − λ₂^phys/λ₃^phys|
+     Lower is better; 0 = identical relaxation hierarchy.
+
+   Metric 2 — Row-normalized KL divergence (fidelity score F):
+     F = −Σ_i π_i Σ_j T_phys(i→j) log(T_phys(i→j) / T_MC(i→j))
+     Higher (less negative) is better; F=0 = perfect match.
+     Returns -Infinity (hard failure) if T_MC(i→j)=0 for any
+     transition where T_phys(i→j) > 0 — the algorithm is completely
+     missing a physically required transition.
+
+   All functions must be called inside a Block where the energy
+   function evaluates numerically (i.e. couplingJ/fieldF are concrete).
+
+   These functions are geometry-independent except for:
+   - BuildTPhys: requires nGrid² == L (2D square lattice states).
+   - $tPhysD2: computes minimum-image distance on an nGrid×nGrid torus.
+   Both degrade gracefully (return None) for non-square lattices.
+   ================================================================ *)
+
+(* Minimum-image squared distance on an nGrid×nGrid torus.
+   Self-contained — does not depend on $row/$col from vmmc_2d_grid.wl. *)
+$tPhysD2[s1_Integer, s2_Integer, nGrid_Integer] :=
+  With[{r1 = Ceiling[s1/nGrid], c1 = Mod[s1-1, nGrid]+1,
+        r2 = Ceiling[s2/nGrid], c2 = Mod[s2-1, nGrid]+1},
+    With[{dr0 = Abs[r1-r2], dc0 = Abs[c1-c2]},
+      Min[dr0, nGrid-dr0]^2 + Min[dc0, nGrid-dc0]^2]]
+
+(* True iff si→sj is a single nearest-neighbor particle hop (d²=1).
+   Exactly two sites must differ: one becomes empty, one becomes occupied,
+   by the same particle type, at torus distance 1. *)
+$tPhysSingleHopQ[si_List, sj_List, nGrid_Integer] :=
+  Module[{diff, s1, s2},
+    diff = Select[Range[Length[si]], si[[#]] =!= sj[[#]] &];
+    If[Length[diff] =!= 2, Return[False]];
+    {s1, s2} = diff;
+    Which[
+      si[[s1]] > 0 && sj[[s1]] == 0 &&
+        si[[s2]] == 0 && sj[[s2]] > 0 &&
+        si[[s1]] == sj[[s2]] && $tPhysD2[s1, s2, nGrid] == 1, True,
+      si[[s2]] > 0 && sj[[s2]] == 0 &&
+        si[[s1]] == 0 && sj[[s1]] > 0 &&
+        si[[s2]] == sj[[s1]] && $tPhysD2[s1, s2, nGrid] == 1, True,
+      True, False]]
+
+(* BuildTPhys: Glauber single-particle transition matrix.
+   Must be called in a scope where energyFn evaluates numerically.
+   Returns a dense Float64 matrix (rows indexed by allStates position),
+   or None if the states are not from a 2D square lattice. *)
+BuildTPhys[allStates_List, energyFn_, numBeta_?NumericQ] :=
+  Module[{L, nGrid, nPart, z, n, idx, mat, dE, rate},
+    L     = Length[allStates[[1]]];
+    nGrid = Round[Sqrt[L]];
+    If[nGrid^2 =!= L, Return[None]];
+    nPart = Count[allStates[[1]], _?(# > 0 &)];
+    If[nPart == 0, Return[None]];
+    z   = 4;
+    n   = Length[allStates];
+    idx = Association @ Table[allStates[[k]] -> k, {k, n}];
+    mat = ConstantArray[0., {n, n}];
+    Do[
+      Do[
+        If[si =!= sj && $tPhysSingleHopQ[si, sj, nGrid],
+          dE   = N[energyFn[sj] - energyFn[si]];
+          rate = If[numBeta * dE >= 500., 0.,
+                   (1./nPart) * (1./z) / (1. + Exp[numBeta * dE])];
+          mat[[idx[si], idx[sj]]] = rate],
+        {sj, allStates}],
+      {si, allStates}];
+    Do[mat[[k, k]] = 1. - Total @ Delete[mat[[k]], k], {k, n}];
+    mat]
+
+(* $tAssocToNumericMatrix: evaluate a symbolic T_MC Association to a
+   numeric matrix.  Must be called in a scope where all symbolic atoms
+   (couplingJ, fieldF, \[Beta], physLen, ...) evaluate numerically. *)
+$tAssocToNumericMatrix[t_Association, allStates_List] :=
+  Module[{n, idx, mat},
+    n   = Length[allStates];
+    idx = Association @ Table[allStates[[k]] -> k, {k, n}];
+    mat = ConstantArray[0., {n, n}];
+    Do[mat[[idx[si], idx[sj]]] = N @ Lookup[t, Key[{si, sj}], 0],
+       {si, allStates}, {sj, allStates}];
+    mat]
+
+(* ComputeMetric1: eigenvalue spectrum ratio.
+   Sorts eigenvalues by real part (descending); eigenvalue 1 is always
+   first for an ergodic chain.  Metric = |λ₂^MC/λ₃^MC − λ₂^P/λ₃^P|.
+   Returns Indeterminate when fewer than 3 states or near-zero λ₃. *)
+ComputeMetric1[matMC_?MatrixQ, matPhys_?MatrixQ] :=
+  Module[{n, eMC, eP, e2MC, e3MC, e2P, e3P},
+    n = Dimensions[matMC][[1]];
+    If[n < 3, Return[Indeterminate]];
+    eMC  = Sort[Re @ Eigenvalues[N[matMC]],  Greater];
+    eP   = Sort[Re @ Eigenvalues[N[matPhys]], Greater];
+    e2MC = eMC[[2]];  e3MC = eMC[[3]];
+    e2P  = eP[[2]];   e3P  = eP[[3]];
+    If[Abs[e3MC] < 1.*^-10 || Abs[e3P] < 1.*^-10, Return[Indeterminate]];
+    Abs[e2MC/e3MC - e2P/e3P]]
+
+(* ComputeMetric2: row-normalised KL divergence (fidelity score F).
+   boltzmannWeights = {exp(-β·E(s)) for s in allStates} (unnormalised).
+   Returns -Infinity on hard failure (T_MC misses a physical transition). *)
+ComputeMetric2[matMC_?MatrixQ, matPhys_?MatrixQ, boltzmannWeights_List] :=
+  Module[{n, Z, F, pii, pPhys, pMC},
+    n = Dimensions[matMC][[1]];
+    Z = Total[boltzmannWeights];
+    F = 0.;
+    Do[
+      pii = boltzmannWeights[[i]] / Z;
+      Do[
+        pPhys = matPhys[[i, j]];
+        pMC   = matMC[[i, j]];
+        If[pPhys > 1.*^-15,
+          If[pMC < 1.*^-15, Return[-Infinity, Module]];
+          F += pii * pPhys * Log[pPhys / pMC]],
+        {j, n}],
+      {i, n}];
+    -F]

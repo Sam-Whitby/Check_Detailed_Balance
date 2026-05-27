@@ -82,6 +82,7 @@ maxBitDepth     = 20;
 verbose         = False;
 fastChecker     = False;   (* FastChecker=1: use Exp-polynomial fast path *)
 seedBitStrings  = None;    (* SeedBitStrings=X,Y: test specific bit strings *)
+physFidelity    = False;   (* PhysFidelity=1: compare T_MC to T_phys (Glauber) *)
 
 Do[
   If[StringMatchQ[opt, "MaxBitString="   ~~ __], maxBitString   = StringDrop[opt, 13]];
@@ -90,7 +91,8 @@ Do[
   If[StringMatchQ[opt, "NSteps="         ~~ __], nSteps         = ToExpression[StringDrop[opt,  7]]];
   If[StringMatchQ[opt, "MaxBitDepth="    ~~ __], maxBitDepth    = ToExpression[StringDrop[opt, 12]]];
   If[StringMatchQ[opt, "Verbose="        ~~ __], verbose        = ToExpression[StringDrop[opt,  8]]];
-  If[StringMatchQ[opt, "FastChecker="    ~~ __], fastChecker    = (StringDrop[opt, 12] =!= "0")],
+  If[StringMatchQ[opt, "FastChecker="    ~~ __], fastChecker    = (StringDrop[opt, 12] =!= "0")];
+  If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")],
   {opt, kvArgs}];
 
 (* ---- Validate MaxBitString ---- *)
@@ -215,9 +217,11 @@ colBits  = If[seedBitStrings =!= None,
   Max[14, Max[StringLength /@ StringSplit[seedBitStrings, ","]] + 2],
   Max[14, StringLength[maxBitString] + 2]];
 colState = 26; colN = 9; colSym = 10; colFail = 8; colKL = 12; colNum = 10; colErgo = 14;
+colM1 = 14; colM2 = 14;
 totalCols = colBits + colState + colN + colErgo +
   If[mode =!= "Numerical", colSym + colFail, 0] +
-  If[mode =!= "Symbolic",  colKL  + colNum,  0];
+  If[mode =!= "Symbolic",  colKL  + colNum,  0] +
+  If[physFidelity, colM1 + colM2, 0];
 
 (* ---- Print header ---- *)
 Print[];
@@ -236,6 +240,7 @@ If[fastChecker && mode =!= "Numerical",
   Print["SymChecker:    FastChecker (Exp-polynomial; FullSimplify fallback)"],
   If[mode =!= "Numerical",
     Print["SymChecker:    FullSimplify (standard)"]]];
+If[physFidelity, Print["PhysFidelity:  Enabled (T_phys Glauber; M1=EigRatio, M2=KLFidelity)"]];
 Print[StringRepeat["=", totalCols]];
 Print[];
 
@@ -246,7 +251,9 @@ Print[StringPadRight["Bits",    colBits],
       If[mode =!= "Numerical",
          StringPadRight["Symbolic", colSym] <> StringPadRight["#Fail", colFail], ""],
       If[mode =!= "Symbolic",
-         StringPadRight["KL", colKL] <> StringPadRight["Numerical", colNum], ""]];
+         StringPadRight["KL", colKL] <> StringPadRight["Numerical", colNum], ""],
+      If[physFidelity,
+         StringPadRight["M1(EigRatio)", colM1] <> StringPadRight["M2(Fidelity)", colM2], ""]];
 Print[StringRepeat["-", totalCols]];
 
 (* ================================================================
@@ -392,6 +399,49 @@ Do[
     numResult = If[kl < 0.02, "PASS", "FAIL"];
     If[numResult === "PASS", numPassCount++, numFailCount++]];
 
+  (* ---- Physical fidelity metrics (if requested) ---- *)
+  (* Builds T_phys (Glauber single-particle) and compares to T_MC.
+     Uses the same Block structure as numerical MCMC so all symbolic
+     atoms (couplingJ, physLen, epsLJ, \[Beta]) evaluate numerically. *)
+  m1Str = "-"; m2Str = "-";
+  If[physFidelity,
+    $pfRestoreSyms = Map[Symbol, Keys[$abstractParamRestore]];
+    $pfRestoreVals = Values[$abstractParamRestore];
+    $pfAllBlockVars = Union[compNumericVars, $fixedSymVars, $pfRestoreSyms, {\[Beta]}];
+    $computePhysFidelity[] := Module[{tPhys, tMCmat, bw, m1, m2},
+      tPhys  = BuildTPhys[allStates, $energy, $numBeta];
+      If[tPhys === None, m1Str = "N/A"; m2Str = "N/A"; Return[]];
+      tMCmat = $tAssocToNumericMatrix[matrix, allStates];
+      bw     = N[Exp[-$numBeta * $energy[#]] & /@ allStates];
+      m1     = ComputeMetric1[tMCmat, tPhys];
+      m2     = ComputeMetric2[tMCmat, tPhys, bw];
+      m1Str  = If[m1 === Indeterminate, "N/A",
+                  If[Abs[m1] < 1.*^-6, "~0",
+                     ToString[Round[m1, 0.001]]]];
+      m2Str  = Which[m2 === -Infinity, "-Inf",
+                     m2 === Indeterminate, "N/A",
+                     True, ToString[Round[m2, 0.001]]]];
+    $pfActivateAndRun[] :=
+      If[Length[DownValues[$pairEnergy]] > 0 || Length[DownValues[$fieldFConcrete]] > 0,
+        Block[{fieldF, couplingJ},
+          If[Length[DownValues[$fieldFConcrete]] > 0,
+            fieldF[x_Integer, y_Integer, L_Integer] := $fieldFConcrete[x, y, L]];
+          If[Length[DownValues[$pairEnergy]] > 0,
+            couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2]];
+          $computePhysFidelity[]],
+        $computePhysFidelity[]];
+    If[$pfAllBlockVars =!= {},
+      SeedRandom[42];
+      $pfCompVals = If[compNumericVars =!= {}, RandomReal[{-1, 1}, Length[compNumericVars]], {}];
+      Block[Evaluate[$pfAllBlockVars],
+        If[compNumericVars =!= {}, MapThread[Set, {compNumericVars, $pfCompVals}]];
+        If[$fixedSymVars =!= {}, MapThread[Set, {$fixedSymVars, $fixedNumVals}]];
+        If[$pfRestoreSyms =!= {}, MapThread[Set, {$pfRestoreSyms, $pfRestoreVals}]];
+        \[Beta] = $numBeta;
+        $pfActivateAndRun[]],
+      \[Beta] = $numBeta;
+      $pfActivateAndRun[]]];
+
   (* ---- Print result row ---- *)
   clearProgress[];
   Print[StringPadRight[bitsStr,           colBits],
@@ -401,7 +451,9 @@ Do[
         If[mode =!= "Numerical",
            StringPadRight[symResult, colSym] <> StringPadRight[failStr, colFail], ""],
         If[mode =!= "Symbolic",
-           StringPadRight[klStr, colKL] <> StringPadRight[numResult, colNum], ""]];
+           StringPadRight[klStr, colKL] <> StringPadRight[numResult, colNum], ""],
+        If[physFidelity,
+           StringPadRight[m1Str, colM1] <> StringPadRight[m2Str, colM2], ""]];
 
   writeProgress[$loopIdx],
 

@@ -128,6 +128,7 @@ wolframscript -file check.wls <algorithm.wl> [options]
 | `NSteps=N` | `50000` | MCMC steps for numerical check |
 | `MaxBitDepth=N` | `20` | BFS depth cap per state |
 | `FastChecker=1` | off | Exp-polynomial fast checker (see below) |
+| `PhysFidelity=1` | off | Compare T_MC to physical Glauber dynamics; adds M1 and M2 columns (see below) |
 | `Verbose=True` | `False` | Per-state BFS progress |
 
 ### Report (single seed state)
@@ -220,6 +221,56 @@ wolframscript -file animate.wls examples3/vmmc_2d_field.wl \
 After `PiecewiseExpand`, DB expressions reduce to sums of `c·exp(−β·L)` terms. DB holds iff all coefficient groups sum to zero — verified by `Expand[...] === 0` (microseconds). Falls back to `FullSimplify` for inconclusive cases. Works directly for Metropolis acceptance; falls back gracefully for Barker/heat-bath.
 
 Both checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (speedup ∝ translational symmetry) → threshold-based `ParallelMap`.
+
+---
+
+## Physical fidelity metrics (`PhysFidelity=1`)
+
+Adds two columns to the checker output that measure how closely the algorithm's transition matrix T_MC matches the physical reference dynamics.
+
+### Reference: T_phys (Glauber single-particle)
+
+For a 2D periodic square lattice with N particles on an nGrid×nGrid torus, the physical reference is Glauber single-particle dynamics. For each state pair (i, j) differing by exactly one nearest-neighbor hop (torus distance d²=1, same particle type):
+
+```
+T_phys(i→j) = (1/N) · (1/z) · 1/(1 + exp(β·ΔE))
+```
+
+where z=4 (2D coordination number) and ΔE = E(j)−E(i). Diagonal entries make rows sum to 1. All other entries are zero. T_phys is built exactly from the enumerated state space — no simulation required.
+
+This is the correct physical kinetics for a single colloid undergoing thermally activated nearest-neighbor hops. It satisfies detailed balance by construction.
+
+### Metric 1 — Eigenvalue spectrum ratio
+
+```
+M1 = |λ₂^MC/λ₃^MC − λ₂^phys/λ₃^phys|
+```
+
+Eigenvalues are sorted by real part (descending); λ₁=1 for any ergodic chain. M1 measures whether the algorithm reproduces the correct *hierarchy* of relaxation timescales. M1=0 means the ratio of the two slowest relaxation rates matches Glauber exactly; larger M1 means the algorithm's dynamics have a distorted timescale structure.
+
+Returns `N/A` when fewer than 3 states or when λ₃ is near zero.
+
+### Metric 2 — Row-normalised KL divergence (fidelity score)
+
+```
+F = −Σ_i π_i Σ_j T_phys(i→j) · log(T_phys(i→j) / T_MC(i→j))
+```
+
+where π_i ∝ exp(−β E(i)) is the Boltzmann weight. F=0 is a perfect match; F<0 indicates the algorithm departs from physical dynamics (more negative = further from physical). Returns `-Inf` (hard failure) if T_MC(i→j)=0 for any transition where T_phys(i→j)>0 — the algorithm completely misses a physically required move.
+
+### Interpretation
+
+| Algorithm | Expected M2 | Reason |
+|-----------|-------------|--------|
+| Glauber single-particle | 0 | Exact match |
+| Kawasaki (2D swap) | slightly negative | Swaps two particles; different proposal distribution |
+| VMMC | more negative | Cluster moves; completely different kinetic pathway |
+
+M2 is not a pass/fail criterion — it quantifies the *kinetic fidelity* of the algorithm relative to Brownian dynamics. A more negative M2 for VMMC is expected and reflects the algorithmic acceleration: VMMC decorrelates faster than physical dynamics by construction.
+
+### Scope
+
+`PhysFidelity=1` is only meaningful for 2D square-lattice systems (returns `N/A` for 1D or non-square lattices). It requires the energy function to evaluate numerically — the same environment used for the numerical MCMC check.
 
 ---
 
