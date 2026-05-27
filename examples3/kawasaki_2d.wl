@@ -136,3 +136,7 @@ DisplayState[state_List] :=
       "|"]]
 
 numBeta = 1
+
+(* Symmetry group: uniform bond selection and nearest-neighbour coupling have
+   full translational and D4 symmetry on the square torus. *)
+$symmetryGroup = {"translation", "D4"}

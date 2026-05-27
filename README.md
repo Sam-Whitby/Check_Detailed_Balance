@@ -14,11 +14,33 @@ Symbolically proves or disproves detailed balance for Monte Carlo algorithms wri
 
 2. **BFS over bit sequences.** Starting from a seed state, all possible bit sequences are enumerated. Each complete path gives a (start, end, weight) triple. Weights for the same (start, end) pair are summed to form the symbolic transition matrix T.
 
-3. **Symbolic DB check.** For each state pair (i,j): `T(i→j)·exp(−β E(i)) − T(j→i)·exp(−β E(j)) =? 0`. β is a free symbol so Boltzmann factors cancel algebraically.
+   If the algorithm declares `$symmetryGroup`, BFS operates on *canonical representatives* only — one state per symmetry orbit. States are canonicalised to the lexicographic minimum over the orbit before being added to the BFS queue. This reduces the number of states processed by a factor equal to the orbit size (up to 8·nGrid² for full D4 + translation symmetry), without affecting correctness.
 
-4. **Numerical MCMC check.** The algorithm runs as a genuine Markov chain; empirical distribution vs Boltzmann distribution via KL divergence. KL < 0.02 is a pass.
+3. **Symbolic DB check.** For each canonical state pair (i,j): `|orbit(i)|·T(i→j)·exp(−β E(i)) = |orbit(j)|·T(j→i)·exp(−β E(j))`. The orbit-size factors (integers) correct for the fact that canonical states may represent different numbers of physical states. β is a free symbol so Boltzmann factors cancel algebraically.
 
-**Ergodicity check.** For N labeled particles on S sites, the theoretical reachable state count is (S)_N = S·(S−1)·…·(S−N+1). A BFS shortfall indicates a non-ergodic chain.
+4. **Numerical MCMC check.** Canonical states are expanded back to their full orbits for MCMC; visit counts and Boltzmann weights are aggregated by orbit. KL < 0.02 is a pass.
+
+**Ergodicity check.** For N labeled particles on S sites, the theoretical reachable state count is (S)_N = S·(S−1)·…·(S−N+1). With symmetry enabled, this full count is compared against the number of physical states represented by the canonical set.
+
+---
+
+## Symmetry reduction
+
+Algorithm files can declare `$symmetryGroup` to enable BFS state canonicalization:
+
+```mathematica
+$symmetryGroup = {"translation"}        (* torus translations only *)
+$symmetryGroup = {"translation", "D4"}  (* translations + 4 rotations + 4 reflections *)
+```
+
+**What counts as a valid symmetry group:**
+- The energy function must be invariant under the declared symmetries.
+- The proposal distribution must be invariant (i.e. the move kernel commutes with the symmetry).
+- Both conditions hold for nearest-neighbour or isotropic energy functions on a square torus with uniform or Gaussian proposals.
+
+**Field check.** If the algorithm defines `fieldF` or `$fieldFConcrete` (a spatially varying external field), symmetry reduction is automatically disabled regardless of `$symmetryGroup`. Fields break translational symmetry.
+
+**Orbit-size correction.** When two canonical states have orbits of different sizes (e.g. a fully symmetric configuration vs. a generic one), the DB condition must account for this. The checker scales the transition matrix entry T(i→j) by |orbit(i)| before the algebraic check, so integer factors appear instead of rational functions of β — much easier for `FullSimplify`.
 
 ---
 
@@ -69,6 +91,7 @@ DynamicSymParams[states_List] := ...   (* per-component symbolic parameters *)
 DisplayState[state_] := ...            (* human-readable state string *)
 ValidStateIDs[maxId_] := ...           (* restrict enumeration to valid IDs *)
 $checkerAbstractParams = {"name1", ...} (* scalar params cleared before BFS *)
+$symmetryGroup = {"translation", "D4"} (* symmetry group for BFS canonicalization *)
 ```
 
 ### Abstract scalar parameters (`$checkerAbstractParams`)
@@ -168,7 +191,7 @@ Any `name=value` argument not in the table is applied as a Mathematica assignmen
 ## Quick examples
 
 ```bash
-# Check vmmc_continuous.wl (Gaussian VMMC, 3×3 seed)
+# Check vmmc_continuous.wl (Gaussian VMMC, 3×3 seed, symmetry-reduced)
 wolframscript -file check.wls examples3/vmmc_continuous.wl \
   SeedBitStrings=11110101011110011 Mode=Both
 
@@ -176,10 +199,10 @@ wolframscript -file check.wls examples3/vmmc_continuous.wl \
 wolframscript -file animate.wls examples3/vmmc_continuous.wl \
   Sites=400 N=10 Steps=2000 Beta=1 FPS=8 Simple=1 NoParams=1 physLen=2 '$maxD2=8'
 
-# Check 2D Kawasaki symbolically + numerically
+# Check 2D Kawasaki symbolically + numerically (symmetry-reduced)
 wolframscript -file check.wls examples3/kawasaki_2d.wl
 
-# Check VMMC with user-defined field (fast polynomial checker)
+# Check VMMC with user-defined field (symmetry auto-disabled; fast polynomial checker)
 wolframscript -file check.wls examples3/vmmc_2d_field.wl \
   MaxBitString=1111111111 Mode=Symbolic FastChecker=1
 
@@ -196,19 +219,21 @@ wolframscript -file animate.wls examples3/vmmc_2d_field.wl \
 
 ## Example files (`examples3/`)
 
-| File | Description | DB | Ergodic |
-|------|-------------|----|----|
-| `kawasaki_1d.wl` | 1D Kawasaki nearest-neighbour swap on a periodic ring | PASS | PASS |
-| `kawasaki_2d.wl` | 2D Kawasaki on a periodic square lattice | PASS | PASS |
-| `vmmc_2d_field.wl` | VMMC with user-defined field and coupling functions | PASS | PASS |
-| `vmmc_continuous.wl` | VMMC with Gaussian proposal, LJ energy; three-file structure | PASS | PASS |
-| `jump_1d_weighted.wl` | 1D jump dynamics using `RandomChoice[weights → ...]` | PASS | PASS |
-| `kawasaki_1d_fail.wl` | Sign-reversed dE in Metropolis | FAIL | PASS |
-| `kawasaki_1d_nonergodic.wl` | Only type-1 particles move; type-2+ frozen | PASS | FAIL |
-| `cluster_1d_fail.wl` | Cluster slides only rightward (asymmetric proposal) | FAIL | FAIL |
-| `vmmc_2d_edit.wl` | VMMC with only 3 of 4 directions (asymmetric proposal) | FAIL on 3×3 | — |
+| File | Description | Symmetry | DB | Ergodic |
+|------|-------------|----------|----|---------|
+| `kawasaki_1d.wl` | 1D Kawasaki nearest-neighbour swap on a periodic ring | — | PASS | PASS |
+| `kawasaki_2d.wl` | 2D Kawasaki on a periodic square lattice | translation, D4 | PASS | PASS |
+| `vmmc_2d_field.wl` | VMMC with user-defined field and coupling functions | — (field) | PASS | PASS |
+| `vmmc_continuous.wl` | VMMC with Gaussian proposal, LJ energy; three-file structure | translation, D4 | PASS | PASS |
+| `jump_1d_weighted.wl` | 1D jump dynamics using `RandomChoice[weights → ...]` | — | PASS | PASS |
+| `kawasaki_1d_fail.wl` | Sign-reversed dE in Metropolis | — | FAIL | PASS |
+| `kawasaki_1d_nonergodic.wl` | Only type-1 particles move; type-2+ frozen | — | PASS | FAIL |
+| `cluster_1d_fail.wl` | Cluster slides only rightward (asymmetric proposal) | — | FAIL | FAIL |
+| `vmmc_2d_edit.wl` | VMMC with only 3 of 4 directions (asymmetric proposal) | — | FAIL on 3×3 | — |
 
 `kawasaki_1d_nonergodic.wl` demonstrates the key case: **DB PASS + Ergodicity FAIL**. Detailed balance cannot detect non-ergodicity; the two checks are independent.
+
+`vmmc_2d_field.wl` demonstrates automatic symmetry disabling: it declares `$symmetryGroup = {"translation", "D4"}` but the presence of `fieldF` causes the checker to ignore this declaration.
 
 ---
 

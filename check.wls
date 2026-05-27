@@ -111,7 +111,7 @@ ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, D
          fieldF, couplingJ,
          $fieldFConcrete, $pairEnergy, $concreteParams,
          $fieldFreeParams, $couplingFreeParams,
-         $checkerAbstractParams];
+         $checkerAbstractParams, $symmetryGroup];
 Print["Loading: ", algFile];
 Get[algFile];
 
@@ -174,6 +174,20 @@ Which[
     Block[{couplingJ},
       couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2];
       $checkCouplingSymmetry[]]];
+
+(* ---- Symmetry group ----
+   Algorithm files declare $symmetryGroup = {"translation"} or {"translation","D4"}.
+   Symmetry reduction is disabled automatically when a field function is active,
+   since fields break translational/rotational invariance.
+   The algorithm author is responsible for declaring the correct symmetry;
+   a mis-declared symmetry can produce false positives in the DB check. *)
+$symGroupRaw = If[ValueQ[$symmetryGroup] && ListQ[$symmetryGroup], $symmetryGroup, {}];
+$hasField    = Length[DownValues[fieldF]] > 0 || Length[DownValues[$fieldFConcrete]] > 0;
+$useSymmetry = $symGroupRaw =!= {} && !$hasField;
+If[$symGroupRaw =!= {} && $hasField,
+  Print["Note: $symmetryGroup declared but field is active — symmetry reduction disabled."]];
+If[$useSymmetry,
+  Print["SymmetryGroup: ", $symGroupRaw, "  (BFS state canonicalization enabled)"]];
 
 (* Static symbolic parameters (may be None if only DynamicSymParams is used) *)
 $staticSysParams = If[ValueQ[symParams], symParams, None];
@@ -241,6 +255,8 @@ If[fastChecker && mode =!= "Numerical",
   If[mode =!= "Numerical",
     Print["SymChecker:    FullSimplify (standard)"]]];
 If[physFidelity, Print["PhysFidelity:  Enabled (T_phys Glauber; M1=EigRatio, M2=KLFidelity)"]];
+If[$useSymmetry,
+  Print["SymmetryGroup: ", $symGroupRaw, "  (BFS state canonicalization enabled)"]];
 Print[StringRepeat["=", totalCols]];
 Print[];
 
@@ -305,6 +321,12 @@ Do[
   state = Check[BitsToState[bitString], $Failed];
   If[state === $Failed || state === None,
     writeProgress[$loopIdx]; Continue[]];
+  (* When symmetry is active, canonicalize before the covered check so that
+     orbit members of an already-processed state are correctly skipped. *)
+  If[$useSymmetry,
+    With[{ng = Round[Sqrt[Length[state]]]},
+      If[ng^2 == Length[state],
+        state = $dbcCanonicalState[state, ng, $symGroupRaw]]]];
   If[KeyExistsQ[coveredAssoc, state],
     writeProgress[$loopIdx]; Continue[]];
 
@@ -314,9 +336,10 @@ Do[
 
   (* ---- BFS: discover connected component ---- *)
   treeData = BuildTreeAT[state, $alg,
-               "MaxBitDepth" -> maxBitDepth,
-               "TimeLimit"   -> 120.,
-               "Verbose"     -> verbose];
+               "MaxBitDepth"   -> maxBitDepth,
+               "TimeLimit"     -> 120.,
+               "Verbose"       -> verbose,
+               "SymmetryGroup" -> If[$useSymmetry, $symGroupRaw, {}]];
 
   If[MatchQ[treeData, $dbc$cantHandle[_]],
     clearProgress[];
@@ -325,14 +348,17 @@ Do[
     writeProgress[$loopIdx];
     testedCount++; Continue[]];
 
-  allStates = Sort @ Keys[treeData];
+  (* Filter $dbcTreeMeta sentinel from state keys *)
+  allStates = Sort @ Select[Keys[treeData], # =!= $dbcTreeMeta &];
   matrix    = TreeATToMatrix[treeData];
   nStates   = Length[allStates];
   coveredAssoc = Join[coveredAssoc, Association[# -> True & /@ allStates]];
   testedCount++;
 
   (* ---- Ergodicity check ---- *)
-  ergoResult = CheckErgodicity[allStates];
+  ergoResult = If[$useSymmetry && KeyExistsQ[treeData, $dbcTreeMeta],
+    CheckErgodicity[allStates, treeData[$dbcTreeMeta]["fullCount"]],
+    CheckErgodicity[allStates]];
   ergoStr    = If[ergoResult["ergodic"],
     ergoPassCount++; "PASS (" <> ToString[ergoResult["found"]] <> ")",
     ergoFailCount++; "FAIL (" <> ToString[ergoResult["found"]] <>
@@ -354,11 +380,25 @@ Do[
   compSymAssumptions = Map[Element[#, Reals] &, Union[compSymVars, $fixedSymVars]];
 
   (* ---- Symbolic check ---- *)
+  (* When symmetry is active, orbit sizes may differ across canonical states.
+     The correct DB condition is:
+       |orbit(c1)| · T(c1→c2) · exp(-β·E(c1)) = |orbit(c2)| · T(c2→c1) · exp(-β·E(c2))
+     We implement this by scaling each matrix entry T[{c1,c2}] by |orbit(c1)|.
+     When all orbit sizes are equal the scaling is uniform and cancels in the ratio. *)
   symResult = "-"; failStr = "-";
   If[mode =!= "Numerical",
+    $matrixForCheck =
+      If[$useSymmetry,
+        With[{ng    = Round[Sqrt[Length[allStates[[1]]]]],
+              osMap = AssociationThread[allStates ->
+                (Length[$dbcOrbitStates[#, Round[Sqrt[Length[allStates[[1]]]]], $symGroupRaw]] & /@ allStates)]},
+          Association @ KeyValueMap[
+            Function[{key, val}, key -> val * osMap[key[[1]]]],
+            matrix]],
+        matrix];
     With[{viol = If[fastChecker,
-                  CheckDetailedBalanceFast[matrix, allStates, $energy, compSymAssumptions],
-                  CheckDetailedBalance[    matrix, allStates, $energy, compSymAssumptions]]},
+                  CheckDetailedBalanceFast[$matrixForCheck, allStates, $energy, compSymAssumptions],
+                  CheckDetailedBalance[    $matrixForCheck, allStates, $energy, compSymAssumptions]]},
       symResult = If[viol === {}, "PASS", "FAIL"];
       failStr   = If[viol === {}, "0",    ToString[Length[viol]]];
       If[symResult === "PASS", symPassCount++, symFailCount++]]];
@@ -367,9 +407,24 @@ Do[
   klStr = "-"; numResult = "-";
   If[mode =!= "Symbolic" && nStates > 1,
     allBlockVars = Union[compNumericVars, $fixedSymVars];
-    $runNumericalMCMC[] := (
-      mcmcCounts = RunNumericalMCMCAT[allStates, $alg, $numBeta, "NSteps" -> nSteps];
-      boltzmann  = BoltzmannWeightsAT[allStates, $energy, $numBeta]);
+    (* When symmetry is active, expand canonical states to their full orbit so
+       the MCMC samples all physically distinct states.  Visit counts are then
+       aggregated back to canonical representatives before the KL comparison. *)
+    $mcmcNG = Round[Sqrt[Length[allStates[[1]]]]];
+    $mcmcAllStates = If[$useSymmetry,
+      Union @ Flatten[$dbcOrbitStates[#, $mcmcNG, $symGroupRaw] & /@ allStates, 1],
+      allStates];
+    $runNumericalMCMC[] := Module[{rawCounts, rawBoltz, orbits},
+      rawCounts = RunNumericalMCMCAT[$mcmcAllStates, $alg, $numBeta, "NSteps" -> nSteps];
+      rawBoltz  = BoltzmannWeightsAT[$mcmcAllStates, $energy, $numBeta];
+      If[$useSymmetry,
+        orbits    = $dbcOrbitStates[#, $mcmcNG, $symGroupRaw] & /@ allStates;
+        mcmcCounts = AssociationThread[allStates ->
+          (Total[Lookup[rawCounts, Key[#], 0] & /@ #] & /@ orbits)];
+        boltzmann  = AssociationThread[allStates ->
+          (Total[Lookup[rawBoltz,  Key[#], 0] & /@ #] & /@ orbits)],
+        mcmcCounts = rawCounts;
+        boltzmann  = rawBoltz]];
     $activateAndRun[] :=
       If[Length[DownValues[$pairEnergy]] > 0 || Length[DownValues[$fieldFConcrete]] > 0,
         Block[{fieldF, couplingJ},
