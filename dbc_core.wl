@@ -721,6 +721,21 @@ $dbc$contToken /: Ceiling[$dbc$contToken["Uniform", 0, L_Integer, sb_]] :=
                    (4 rotations × 2 reflections, each preceded by all
                    translates).
 
+   NOTE ON PARTICLE-LABEL SYMMETRY: it is tempting to add "particleLabels"
+   as a third option, exploiting the fact that permuting particle labels
+   produces an equivalent DB result (the check is symbolic and permuting
+   labels just renames free coupling variables).  This symmetry is REAL but
+   cannot be exploited via the orbit-size aggregation framework used here.
+   Orbit-size scaling is only valid when the TRANSITION MATRIX is invariant
+   under the symmetry (T(g(s)→g(s')) = T(s→s') for all g).  For spatial
+   symmetries (D4, translation) this holds because the algorithm is
+   geometrically invariant.  For label permutations it does NOT hold:
+   T(s→s') depends on $jPairSym[type_a, type_b] which is type-specific,
+   so T(π(s)→π(s')) ≠ T(s→s') when couplings are abstract free parameters.
+   Applying orbit-size scaling with label-permutation orbits therefore
+   produces incorrect (inflated) scaled matrix entries, leading to false
+   positive DB violations even for correct algorithms.
+
    Only valid for 2D square lattices.  The algorithm author is responsible
    for declaring the correct symmetry; an incorrectly declared symmetry
    can produce false positives in the DB check.  check.wls additionally

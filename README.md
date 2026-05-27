@@ -42,6 +42,8 @@ $symmetryGroup = {"translation", "D4"}  (* translations + 4 rotations + 4 reflec
 
 **Orbit-size correction.** When two canonical states have orbits of different sizes (e.g. a fully symmetric configuration vs. a generic one), the DB condition must account for this. The checker scales the transition matrix entry T(i→j) by |orbit(i)| before the algebraic check, so integer factors appear instead of rational functions of β — much easier for `FullSimplify`.
 
+**Why particle-label permutation cannot be added as a third symmetry.** Permuting particle labels (e.g. swapping which specific particle sits where, while keeping all positions fixed) produces an algorithmically equivalent system in the following sense: the DB *result* (PASS/FAIL) is always identical between label-permuted configurations, because the check is symbolic and permuting labels merely renames the free coupling variables `$jPairSym[1,2]`, `$jPairSym[1,3]`, etc. It is tempting to add `"particleLabels"` as a third symmetry option. However, the orbit-size scaling framework requires that the **transition matrix** itself be invariant under the symmetry — i.e. `T(g(s)→g(s')) = T(s→s')` for all group elements g. This holds for spatial symmetries (D4, translation) because the algorithm is geometrically invariant. It does **not** hold for label permutations: `T(s→s')` depends on `$jPairSym[type_a, type_b]`, which is type-specific, so `T(π(s)→π(s')) ≠ T(s→s')` when the coupling constants are abstract free parameters. Applying orbit-size scaling with a label-permutation orbit inflates the scaled matrix entries, producing false positive DB violations even for correct algorithms (verified empirically on `kawasaki_2d.wl`). Furthermore, for diffusive algorithms (Kawasaki, VMMC) all label-permuted states of a given geometric configuration are in the **same** connected component anyway — particles can diffuse to any arrangement — so label permutation yields no reduction in the number of components to check.
+
 ---
 
 ## Algorithm file structure
@@ -157,6 +159,14 @@ wolframscript -file check.wls <algorithm.wl> [options]
 | `Verbose=True` | `False` | Per-state BFS progress |
 
 `NGrid` and `MaxComponents` together give an intuitive interface: `NGrid=2 MaxComponents=6` means "check the first 6 distinct 2×2 systems, stop there." Both options use lazy ID iteration internally so no large list is held in memory, even when the total state count for that grid size is in the millions.
+
+**Output format.** The `ID` column shows the decimal integer corresponding to the seed bit string (more compact than the raw binary). For 2D states the `State` column prints each grid row on its own line, separated by a blank line, so the layout visually matches the lattice:
+
+```
+ID       State                 #States  Ergodic       Symbolic  #Fail
+41       {0,2}                 3        PASS (24)     PASS      0
+         {3,1}
+```
 
 ### Report (single seed state)
 ```bash
