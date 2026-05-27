@@ -248,11 +248,9 @@ If[$useLazy,
         Table[IntegerDigits[i, 2, maxLen], {i, 0, maxVal}]]]];
 
 (* ---- Column widths ---- *)
-(* When SeedBitStrings is used, base column width on the longest seed string *)
-colBits  = If[seedBitStrings =!= None,
-  Max[14, Max[StringLength /@ StringSplit[seedBitStrings, ","]] + 2],
-  Max[14, StringLength[maxBitString] + 2]];
-colState = 26; colN = 9; colSym = 10; colFail = 8; colKL = 12; colNum = 10; colErgo = 14;
+(* ID column: width for decimal integer representation of maxVal *)
+colBits  = Max[6, IntegerLength[maxVal, 10] + 2];
+colState = 22; colN = 9; colSym = 10; colFail = 8; colKL = 12; colNum = 10; colErgo = 14;
 colM1 = 14; colM2 = 14;
 totalCols = colBits + colState + colN + colErgo +
   If[mode =!= "Numerical", colSym + colFail, 0] +
@@ -294,7 +292,7 @@ If[$useSymmetry,
 Print[StringRepeat["=", totalCols]];
 Print[];
 
-Print[StringPadRight["Bits",    colBits],
+Print[StringPadRight["ID",      colBits],
       StringPadRight["State",   colState],
       StringPadRight["#States", colN],
       StringPadRight["Ergodic", colErgo],
@@ -378,7 +376,7 @@ $loopBody[bitString_List] := Catch[
   If[KeyExistsQ[coveredAssoc, state],
     writeProgress[$loopIdx]; Throw[Null, $dbcSkip]];
 
-  bitsStr  = StringJoin[ToString /@ bitString];
+  bitsStr  = ToString[FromDigits[bitString, 2]];
   stateStr = If[Length[DownValues[DisplayState]] > 0,
                DisplayState[state], ToString[state]];
 
@@ -391,8 +389,10 @@ $loopBody[bitString_List] := Catch[
 
   If[MatchQ[treeData, $dbc$cantHandle[_]],
     clearProgress[];
-    Print[StringPadRight[bitsStr,  colBits], StringPadRight[stateStr, colState],
-          StringPadRight["?", colN], "ERROR: ", treeData[[1]]];
+    With[{eRows = StringSplit[stateStr, "|"]},
+      Print[StringPadRight[bitsStr, colBits], StringPadRight[eRows[[1]], colState],
+            StringPadRight["?", colN], "ERROR: ", treeData[[1]]];
+      Do[Print[StringRepeat[" ", colBits], eRows[[r]]], {r, 2, Length[eRows]}]];
     writeProgress[$loopIdx];
     testedCount++; Throw[Null, $dbcSkip]];
 
@@ -547,16 +547,19 @@ $loopBody[bitString_List] := Catch[
 
   (* ---- Print result row ---- *)
   clearProgress[];
-  Print[StringPadRight[bitsStr,           colBits],
-        StringPadRight[stateStr,          colState],
-        StringPadRight[ToString[nStates], colN],
-        StringPadRight[ergoStr,           colErgo],
+  stateRows = StringSplit[stateStr, "|"];
+  Print[StringPadRight[bitsStr,             colBits],
+        StringPadRight[stateRows[[1]],      colState],
+        StringPadRight[ToString[nStates],   colN],
+        StringPadRight[ergoStr,             colErgo],
         If[mode =!= "Numerical",
            StringPadRight[symResult, colSym] <> StringPadRight[failStr, colFail], ""],
         If[mode =!= "Symbolic",
            StringPadRight[klStr, colKL] <> StringPadRight[numResult, colNum], ""],
         If[physFidelity,
            StringPadRight[m1Str, colM1] <> StringPadRight[m2Str, colM2], ""]];
+  Do[Print[StringRepeat[" ", colBits], stateRows[[r]]], {r, 2, Length[stateRows]}];
+  If[Length[stateRows] > 1, Print[]];
 
   writeProgress[$loopIdx];
   (* Return True when MaxComponents is reached — signals the outer loop to stop *)
