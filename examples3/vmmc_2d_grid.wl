@@ -85,9 +85,10 @@ $neighborsD2[s_, nGrid_] := $neighborsD2[s, nGrid] =
    Returns a list of site indices: occupied, not in cluster, sorted
    by the canonical key (d²(p,q), d²(pPost,q), d²(pRev,q), type).
 
-   This function should be used in $vmmcBuildCluster for algorithm
-   files that declare $symmetryGroup.  It replaces the raw
-   DeleteDuplicates@Join[$neighborsD2[...]] computation + If-guard. *)
+   This function is used internally by the checker when $symmetryGroup
+   is declared.  Algorithm files should call $vmmcCandidates (the
+   standard interface); the checker substitutes $dbcCanonicalCandidates
+   via Block during BFS.  See $vmmcCandidates below. *)
 
 $dbcCanonicalCandidates[p_, pPost_, pRev_, state_, nGrid_, inCluster_] :=
   Module[{rawNbrs, occupied},
@@ -102,6 +103,41 @@ $dbcCanonicalCandidates[p_, pPost_, pRev_, state_, nGrid_, inCluster_] :=
       $torusD2[pPost, #, nGrid] &,
       $torusD2[pRev,  #, nGrid] &,
       state[[#]] &}]]
+
+
+(* ================================================================
+   Standard VMMC candidate interface
+   ================================================================
+   $vmmcCandidates is the standard query function for obtaining
+   candidate neighbours in $vmmcBuildCluster.  Algorithm files call
+   this function; the checker substitutes $dbcCanonicalCandidates via
+   Block[{$vmmcCandidates = $dbcCanonicalCandidates}, alg[state]] when
+   $symmetryGroup is declared (see check.wls).
+
+   This mirrors how couplingJ/$pairEnergy work: the algorithm always
+   calls the standard function; the checker injects an alternative
+   implementation without touching the algorithm source.
+
+   Default: plain unordered occupied-non-cluster neighbours.
+   Any deterministic ordering satisfies detailed balance per
+   Whitelam-Geissler, so this default is correct for real (non-checker)
+   runs.  The canonical ordering is only needed for the checker's
+   G-orbit deduplication speedup.
+
+   When $symmetryGroup is declared and the algorithm uses $vmmcCandidates,
+   the checker also runs CheckGInvariance (dbc_core.wl) on the computed
+   transition matrix to verify that T(s→s') = T(g(s)→g(s')) for each
+   declared generator g.  This is a black-box consistency check that
+   does not read algorithm source. *)
+
+$vmmcCandidates[p_, pPost_, pRev_, state_, nGrid_, inCluster_] :=
+  Module[{rawNbrs},
+    rawNbrs = DeleteDuplicates @ Join[
+                $neighborsD2[p,     nGrid],
+                $neighborsD2[pPost, nGrid],
+                $neighborsD2[pRev,  nGrid]];
+    Select[rawNbrs,
+      Function[q, state[[q]] =!= 0 && !KeyExistsQ[inCluster, q]]]]
 
 
 (* ================================================================

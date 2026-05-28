@@ -201,23 +201,53 @@ Which[
       couplingJ[a_Integer, b_Integer, d2_Integer] := $pairEnergy[a, b, d2];
       $checkCouplingSymmetry[]]];
 
-(* ---- Symmetry group ----
-   Algorithm files may declare $symmetryGroup = {"translation"} or {"translation","D4"}.
-   When declared, the canonical neighbour oracle in $dbcCanonicalCandidates ensures
-   seqBernoulli trees are syntactically identical for G-related states, so the
-   existing $dbcDedup hash step automatically collapses G-orbit pairs at no extra cost.
-   The algorithm author is responsible for the declaration — a mis-declared symmetry
-   does not corrupt the DB check (each pair is still evaluated), but the dedup ratio
-   will be lower than claimed if symmetry is over-declared.
-   Fields break translational/rotational invariance; a field + symmetry declaration
-   is not an error but produces no orbit dedup (expressions remain hash-distinct). *)
-$hasSym  = ValueQ[$symmetryGroup] && ListQ[$symmetryGroup] && Length[$symmetryGroup] > 0;
+(* ---- Symmetry group and oracle substitution ----
+   When $symmetryGroup is declared AND the algorithm uses $vmmcCandidates (the
+   standard candidate interface from vmmc_2d_grid.wl), the checker wraps $alg in
+   Block[{$vmmcCandidates = $dbcCanonicalCandidates}, ...] during BFS.  This mirrors
+   the couplingJ/$pairEnergy substitution pattern: the algorithm calls the standard
+   function; the checker injects the canonical implementation without touching source.
+
+   Canonical order makes G-related state pairs produce syntactically identical
+   seqBernoulli trees, so $dbcDedup automatically collapses them — ~|G|-fold speedup.
+
+   The checker also runs CheckGInvariance per component: for each generator g of G,
+   it verifies T(s→s') === T(g(s)→g(s')) using syntactic equality.  This is a
+   black-box check that does NOT read algorithm source; it only needs the T matrix.
+   Checking 4 generators suffices for all |G| ≤ 72 elements (group-generation theorem).
+
+   A G-invariance failure means the $symmetryGroup declaration is wrong.  It does NOT
+   corrupt the DB check: $dbcDedup only collapses syntactically identical expressions,
+   so non-G-invariant T entries are always evaluated separately.  G-invariance failure
+   is reported as a diagnostic alongside the (always-correct) DB result. *)
+$hasSym   = ValueQ[$symmetryGroup] && ListQ[$symmetryGroup] && Length[$symmetryGroup] > 0;
 $hasField = Length[DownValues[fieldF]] > 0 || Length[DownValues[$fieldFConcrete]] > 0;
+
+(* $algCallsOracle: True if the cluster builder actually calls $vmmcCandidates.
+   Checked via DownValues so no algorithm source reading is needed. *)
+$algCallsOracle = Length[DownValues[$vmmcBuildCluster]] > 0 &&
+                  !FreeQ[DownValues[$vmmcBuildCluster], $vmmcCandidates];
+
+(* $useCanonicalOracle: True when all conditions are met to substitute oracle + check G-inv *)
+$useCanonicalOracle = $hasSym && !$hasField && $algCallsOracle;
+
 If[$hasSym,
   Print["Symmetry group: ", StringRiffle[$symmetryGroup, ", "],
-    If[$hasField,
-      "  (WARNING: field active — canonical-neighbour oracle inapplicable; no orbit dedup)",
-      "  (canonical-neighbour oracle active — G-orbit dedup via expression hash)"]]];
+    Which[
+      $hasField,
+        "  (WARNING: field active — G-orbit dedup inapplicable)",
+      $useCanonicalOracle,
+        "  (oracle: $vmmcCandidates \[Rule] $dbcCanonicalCandidates during BFS; G-invariance check active)",
+      True,
+        "  (declared; algorithm uses raw neighbour loop — oracle substitution inactive)"]]];
+
+(* $bfsAlg: algorithm used for BFS.  When oracle is active, wraps $alg so every
+   call to $vmmcCandidates inside the algorithm is redirected to $dbcCanonicalCandidates.
+   In real (non-BFS) runs $vmmcCandidates uses plain unordered neighbours — any ordering
+   is correct by Whitelam-Geissler.  The substitution only affects checker BFS. *)
+$bfsAlg = If[$useCanonicalOracle,
+  Function[s, Block[{$vmmcCandidates = $dbcCanonicalCandidates}, $alg[s]]],
+  $alg];
 
 (* Static symbolic parameters (may be None if only DynamicSymParams is used) *)
 $staticSysParams = If[ValueQ[symParams], symParams, None];
@@ -376,12 +406,13 @@ clearProgress[] := If[verbose, WriteString[$Output, "\r" <> StringRepeat[" ", 78
 (* ================================================================
    Main loop
    ================================================================ *)
-coveredAssoc  = <||>;   (* Association for O(1) covered-state lookup *)
-testedCount   = 0;
-symPassCount  = 0; symFailCount  = 0;
-numPassCount  = 0; numFailCount  = 0;
-ergoPassCount = 0; ergoFailCount = 0;
-$loopIdx      = 0;
+coveredAssoc   = <||>;   (* Association for O(1) covered-state lookup *)
+testedCount    = 0;
+symPassCount   = 0; symFailCount   = 0;
+numPassCount   = 0; numFailCount   = 0;
+ergoPassCount  = 0; ergoFailCount  = 0;
+gInvPassCount  = 0; gInvFailCount  = 0;
+$loopIdx       = 0;
 
 (* ---- Loop body: process one bit string.
         Uses Throw[Null, $dbcSkip] in place of Continue[].
@@ -399,7 +430,7 @@ $loopBody[bitString_List] := Catch[
                DisplayState[state], ToString[state]];
 
   (* ---- BFS: discover connected component ---- *)
-  treeData = BuildTreeAT[state, $alg,
+  treeData = BuildTreeAT[state, $bfsAlg,
                "MaxBitDepth" -> maxBitDepth,
                "TimeLimit"   -> 120.,
                "Verbose"     -> verbose];
@@ -573,6 +604,27 @@ $loopBody[bitString_List] := Catch[
           Round[100. * (1. - $dbcLastDedupUnique / N[$dbcLastDedupTotal])],
           "% hash-collapsed)"]];
 
+  (* ---- G-invariance check ----
+     Verifies T(s→s') === T(g(s)→g(s')) for each declared generator g.
+     Only runs when the canonical oracle was active during BFS (i.e. the
+     algorithm uses $vmmcCandidates).  Syntactic === comparison is valid
+     because canonical ordering makes G-related pairs produce identical
+     expressions; no FullSimplify is needed. *)
+  If[$useCanonicalOracle,
+    With[{gviol = CheckGInvariance[matrix, allStates, $symmetryGroup]},
+      If[gviol === {},
+        gInvPassCount++;
+        Print["  G-invariance: PASS"],
+        gInvFailCount++;
+        With[{v1 = gviol[[1]]},
+          Print["  G-invariance: FAIL  (", Length[gviol], " generator(s) violated)",
+                "  — ", v1["gen"],
+                If[v1["issue"] === "orbit-escapes-component",
+                  ": g(s) not in component for s=" <> ToString[v1["s"]],
+                  ": T mismatch at s=" <> ToString[v1["s"]] <> " s2=" <> ToString[v1["s2"]]]]];
+        Print["  WARNING: $symmetryGroup declaration may be incorrect; ",
+              "DB check is still correct (dedup only collapses hash-identical exprs)."]]]];
+
   writeProgress[$loopIdx];
   (* Return True when MaxComponents is reached — signals the outer loop to stop *)
   IntegerQ[maxComponents] && testedCount >= maxComponents,
@@ -618,8 +670,12 @@ If[mode =!= "Numerical",
   Print["Symbolic   -- PASS: ", symPassCount, "  FAIL: ", symFailCount]];
 If[mode =!= "Symbolic" && (numPassCount + numFailCount) > 0,
   Print["Numerical  -- PASS: ", numPassCount, "  FAIL: ", numFailCount]];
+If[$useCanonicalOracle && (gInvPassCount + gInvFailCount) > 0,
+  Print["G-invariance -- PASS: ", gInvPassCount, "  FAIL: ", gInvFailCount]];
 If[ergoFailCount > 0,
   Print["*** ERGODICITY VIOLATION DETECTED ***"]];
+If[$useCanonicalOracle && gInvFailCount > 0,
+  Print["*** G-INVARIANCE VIOLATION DETECTED — $symmetryGroup declaration is incorrect ***"]];
 If[symFailCount == 0 && numFailCount == 0 && testedCount > 0,
   Print["All tested systems satisfy detailed balance."],
   If[testedCount == 0,

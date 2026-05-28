@@ -103,11 +103,12 @@ $symmetryGroup = {"translation", "D4"};
    Cluster builder
    ================================================================
    Whitelam–Geissler virtual-move cluster construction.
-   Uses $dbcCanonicalCandidates (from vmmc_2d_grid.wl) to iterate
-   neighbours in canonical topological order (sorted by d²_init,
-   d²_fwd, d²_rev, type) so G-related states produce syntactically
-   identical seqBernoulli trees and hash-dedup in the checker
-   automatically collapses G-orbit pairs.
+   Calls $vmmcCandidates (standard interface from vmmc_2d_grid.wl) to
+   obtain candidate neighbours.  In real runs this returns an unordered
+   list — any deterministic order satisfies detailed balance.  When the
+   checker runs BFS it substitutes $dbcCanonicalCandidates via Block,
+   giving canonical order so G-related states produce syntactically
+   identical seqBernoulli trees and $dbcDedup collapses G-orbit pairs.
    Returns the cluster list, or None on frustration. *)
 
 $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
@@ -125,11 +126,13 @@ $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
       pPost = $applyDir[p,  dir, nGrid];
       pRev  = $applyDir[p, {-dir[[1]], -dir[[2]]}, nGrid];
 
-      (* Canonical order: sort occupied non-cluster neighbours by
-         (d²_init, d²_fwd, d²_rev, type).  G-related states produce the
-         same ordering, so seqBernoulli trees are syntactically identical
-         and $dbcDedup collapses G-orbit pairs automatically. *)
-      cands = $dbcCanonicalCandidates[p, pPost, pRev, state, nGrid, inCluster];
+      (* Query the standard candidate interface.  In real runs this returns
+         plain unordered neighbours (any ordering is valid by Whitelam-
+         Geissler).  The checker substitutes $dbcCanonicalCandidates via
+         Block, ensuring canonical topological order so G-related states
+         produce identical seqBernoulli trees and $dbcDedup collapses
+         G-orbit pairs automatically. *)
+      cands = $vmmcCandidates[p, pPost, pRev, state, nGrid, inCluster];
 
       Do[
         q     = cands[[k]];
