@@ -720,10 +720,68 @@ $dbc$contToken /: Ceiling[$dbc$contToken["Uniform", 0, L_Integer, sb_]] :=
    ================================================================ *)
 
 (* ----------------------------------------------------------------
+   $dbcBuildStateLeaves
+   Bit-string BFS for a SINGLE starting state — the parallelisable
+   unit of work.  Returns a list of {bits, nextState, pathWeight}
+   leaves, or $dbc$cantHandle[msg] if the algorithm cannot be
+   analysed.
+
+   nGrid is passed explicitly so each subkernel can set
+   $dbcCurrentNGrid correctly (needed by the NormalDistribution
+   handler in RunWithBitsAT).  All other dependencies (RunWithBitsAT,
+   alg, helper functions) must have been distributed to subkernels
+   via $dbcDistributeBFS[] before ParallelMap is used.
+   ---------------------------------------------------------------- *)
+$dbcBuildStateLeaves[state_, alg_, maxDepth_Integer, tlim_, nGrid_Integer] :=
+  Module[{queue = {{}}, leaves = {}, t0 = AbsoluteTime[], timedOut = False,
+          bits, res, ns, w},
+    $dbcCurrentNGrid = nGrid;
+    While[queue =!= {} && !timedOut,
+      If[AbsoluteTime[] - t0 > tlim, timedOut = True; Break[]];
+      bits = First[queue]; queue = Rest[queue];
+      res  = RunWithBitsAT[alg, state, bits];
+      Which[
+        res === $OutOfBits && Length[bits] < maxDepth,
+          queue = Join[queue, {Append[bits, 0], Append[bits, 1]}],
+        res === $OutOfBits,
+          Print["  WARNING: MaxBitDepth=", maxDepth,
+                " reached for state ", state, " -- path excluded."],
+        res === $dbc$outOfRange,
+          Null,
+        MatchQ[res, $dbc$cantHandle[_]],
+          Print["  ANALYSIS FAILED: algorithm contains a call that cannot be",
+                " converted to readBit/acceptTest:"];
+          Print["    ", res[[1]]];
+          Print["  See the README for supported random-call forms."];
+          Return[res, Module],
+        True,
+          {ns, w} = res;
+          If[!FreeQ[ns, alg],
+            Print["  ANALYSIS FAILED: algorithm returned an unevaluated call as next state."];
+            Print["  Check that the algorithm's pattern matches the seed state type."];
+            Return[$dbc$cantHandle[
+              "Algorithm returned unevaluated call -- pattern mismatch or argument error"],
+              Module]];
+          AppendTo[leaves, {bits, ns, w}]
+      ]
+    ];
+    If[timedOut, Print["  WARNING: Time limit reached for state ", state]];
+    leaves
+  ]
+
+
+(* ----------------------------------------------------------------
    BuildTreeAT
    BFS over bit sequences, starting from seedState.
    New states are discovered automatically as algorithm outputs.
    The algorithm takes ONE argument: alg[state].
+
+   Per-state leaf computation is parallelised across all available
+   subkernels using $dbcBuildStateLeaves.  States are dispatched in
+   batches of nKernels; discovery (adding newly-found states to the
+   work queue) is done sequentially on the main kernel after each
+   batch.  Requires $dbcDistributeBFS[] to have been called once
+   after LaunchKernels[] and after loading the algorithm file.
 
    Returns  Association[ state -> { {bits, nextState, pathWeight}, ... } ]
    ---------------------------------------------------------------- *)
@@ -737,67 +795,54 @@ BuildTreeAT[seedState_, alg_, OptionsPattern[]] := Module[
   {maxDepth = OptionValue["MaxBitDepth"],
    tlim     = N @ OptionValue["TimeLimit"],
    verbose  = OptionValue["Verbose"],
-   nGrid,
+   nGrid, nK,
    discovered, toProcess, result,
-   s, queue, bits, res, ns, w, leaves, t0, timedOut},
+   batch, chunks, batchResults,
+   s, leaves, i},
 
   nGrid      = Round[Sqrt[Length[seedState]]];
+  nK         = Length[Kernels[]];
   discovered = {seedState};
   toProcess  = {seedState};
   result     = <||>;
+  $dbcCurrentNGrid = nGrid;
 
   While[toProcess =!= {},
-    s         = First[toProcess];
-    toProcess = Rest[toProcess];
-    $dbcCurrentNGrid = nGrid;
-    If[verbose, Print["  Tree for state: ", s]];
-    queue    = {{}};
-    leaves   = {};
-    t0       = AbsoluteTime[];
-    timedOut = False;
+    (* Consume the entire frontier in one shot (level-synchronous BFS).
+       New states discovered during this wave fill the next toProcess. *)
+    batch     = toProcess;
+    toProcess = {};
 
-    While[queue =!= {} && !timedOut,
-      If[AbsoluteTime[] - t0 > tlim, timedOut = True; Break[]];
-      bits = First[queue]; queue = Rest[queue];
-      res  = RunWithBitsAT[alg, s, bits];
-      Which[
-        res === $OutOfBits && Length[bits] < maxDepth,
-          queue = Join[queue, {Append[bits, 0], Append[bits, 1]}],
-        res === $OutOfBits,
-          Print["  WARNING: MaxBitDepth=", maxDepth,
-                " reached at prefix ", bits, " for state ", s,
-                " -- path excluded."],
-        (* Rejection-sampling dead-end: bit string mapped to out-of-range value.
-           Silently discard this path; the missing probability is state-independent
-           so the unnormalised transition matrix still satisfies detailed balance. *)
-        res === $dbc$outOfRange,
-          Null,
-        (* Unanalysable call (e.g. RandomVariate, AbsoluteTime) *)
-        MatchQ[res, $dbc$cantHandle[_]],
-          Print["  ANALYSIS FAILED: algorithm contains a call that cannot be",
-                " converted to readBit/acceptTest:"];
-          Print["    ", res[[1]]];
-          Print["  See the README for supported random-call forms."];
-          Return[res, Module],
-        True,
-          {ns, w} = res;
-          (* Guard against unevaluated algorithm calls appearing as states *)
-          If[!FreeQ[ns, alg],
-            Print["  ANALYSIS FAILED: algorithm returned an unevaluated call as next state."];
-            Print["  Check that the algorithm's pattern matches the seed state type."];
-            Return[$dbc$cantHandle[
-              "Algorithm returned unevaluated call -- pattern mismatch or argument error"],
-              Module]
-          ];
-          AppendTo[leaves, {bits, ns, w}];
-          If[!MemberQ[discovered, ns],
-            AppendTo[discovered, ns];
-            AppendTo[toProcess, ns]]
-      ]
+    If[verbose,
+      Do[Print["  Tree for state: ", batch[[j]]], {j, Length[batch]}]];
+
+    (* Parallel: partition batch into ≤nK chunks; each kernel processes its
+       chunk sequentially.  This gives at most nK round-trips per wave
+       regardless of wave size, keeping communication overhead small.
+       Serial fallback when batch has only 1 state or no kernels available. *)
+    With[{a = alg, md = maxDepth, tl = tlim, ng = nGrid},
+      batchResults = If[nK > 0 && Length[batch] > 1,
+        Flatten[
+          ParallelMap[
+            Function[chunk, Map[$dbcBuildStateLeaves[#, a, md, tl, ng] &, chunk]],
+            Partition[batch, UpTo[Ceiling[Length[batch] / nK]]]],
+          1],
+        Map[$dbcBuildStateLeaves[#, alg, maxDepth, tlim, nGrid] &, batch]]
     ];
 
-    If[timedOut, Print["  WARNING: Time limit reached for state ", s]];
-    result[s] = leaves
+    (* Collect: propagate newly-discovered states, surface errors. *)
+    Do[
+      s      = batch[[i]];
+      leaves = batchResults[[i]];
+      If[MatchQ[leaves, $dbc$cantHandle[_]],
+        Return[leaves, Module]];
+      result[s] = leaves;
+      Do[
+        If[!MemberQ[discovered, leaf[[2]]],
+          AppendTo[discovered, leaf[[2]]];
+          AppendTo[toProcess,  leaf[[2]]]],
+        {leaf, leaves}],
+      {i, Length[batch]}]
   ];
 
   result
@@ -1260,6 +1305,19 @@ $dbcDistributeFastChecker[] := (
     $dbcSubstEqualities,
     $dbcCheckOneExpr])
 
+(* Distribute everything needed for parallel BFS: RunWithBitsAT, its
+   helpers ($dbc$irand UpValues, $dbc$contToken UpValues, etc.), and
+   all algorithm-specific definitions loaded into Global`.
+   Must be called AFTER LaunchKernels[] and AFTER Get[algorithmFile].
+
+   Also removes $IterationLimit on subkernels: the BFS While loop can
+   run many thousands of iterations for large state spaces, and the
+   default kernel limit of 4096 causes repeated IPC warning messages
+   that dominate wall time when running in parallel. *)
+$dbcDistributeBFS[] := (
+  DistributeDefinitions["Global`"];
+  ParallelEvaluate[$IterationLimit = Infinity])
+
 (* Worker: evaluate one (expr, assm, symParams) triple.
    Returns {fastResult, expr, assm} so the caller can fall back if needed. *)
 $dbcFastWorker[expr_, assm_, symParams_] :=
@@ -1601,7 +1659,7 @@ $applyGenReflect[state_List, nGrid_Integer] :=
     new]
 
 CheckGInvariance[matrix_Association, allStates_List, symGroup_List] :=
-  Module[{nGrid, stateSet, gens, violations, genFn, gs, gs2, T1, T2, viol},
+  Module[{nGrid, stateSet, gens, violations, genFn, gMap, gs, gs2, T1, T2, viol},
     If[allStates === {}, Return[{}]];
     nGrid = Round[Sqrt[Length[allStates[[1]]]]];
     If[nGrid^2 =!= Length[allStates[[1]]], Return[{}]];  (* non-square: skip *)
@@ -1621,18 +1679,20 @@ CheckGInvariance[matrix_Association, allStates_List, symGroup_List] :=
         "translate", Function[s, $applyGenTrans[s, g["dr"], g["dc"], nGrid]],
         "rotate90",  Function[s, $applyGenRot90[s, nGrid]],
         "reflect",   Function[s, $applyGenReflect[s, nGrid]]];
+      (* Precompute group action for all states once: O(N) calls not O(N²). *)
+      gMap = Association[Table[st -> genFn[st], {st, allStates}]];
       (* Scan all states; stop at first violation for this generator.
          Break[] exits only the innermost enclosing Do. *)
       viol = None;
       Do[
         If[viol =!= None, Break[]];
-        gs = genFn[s];
+        gs = gMap[s];
         If[!KeyExistsQ[stateSet, gs],
           viol = <|"gen" -> g["name"], "s" -> s,
                    "issue" -> "orbit-escapes-component"|>;
           Break[]];
         Do[
-          gs2 = genFn[s2];
+          gs2 = gMap[s2];
           If[!KeyExistsQ[stateSet, gs2], Continue[]];
           T1 = Lookup[matrix, Key[{s,  s2}],  0];
           T2 = Lookup[matrix, Key[{gs, gs2}], 0];

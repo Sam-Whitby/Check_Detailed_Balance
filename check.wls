@@ -406,6 +406,16 @@ clearProgress[] := If[verbose, WriteString[$Output, "\r" <> StringRepeat[" ", 78
 (* ================================================================
    Main loop
    ================================================================ *)
+
+(* Distribute all Global definitions (algorithm + BFS helpers) to
+   subkernels now that the algorithm file is fully loaded and $bfsAlg
+   is set.  $dbcDistributeFastChecker[] was called earlier for the
+   fast-checker symbols; $dbcDistributeBFS[] distributes the superset
+   (DistributeDefinitions["Global`"]) so all RunWithBitsAT helpers,
+   UpValues for $dbc$irand/$dbc$contToken, and the algorithm itself
+   are available to ParallelMap inside BuildTreeAT. *)
+If[$nKernels > 0, $dbcDistributeBFS[]];
+
 coveredAssoc   = <||>;   (* Association for O(1) covered-state lookup *)
 testedCount    = 0;
 symPassCount   = 0; symFailCount   = 0;
