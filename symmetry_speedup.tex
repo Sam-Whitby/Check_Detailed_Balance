@@ -9,7 +9,7 @@
 \setlength{\parindent}{0pt}
 
 \title{Symmetry Reduction in the Detailed Balance Checker:\\
-\large Feasibility, Expected Speedup, and Correctness Conditions}
+\large Expected Speedup, Feasibility, and the Black-Box Problem}
 \author{}
 \date{}
 
@@ -17,228 +17,189 @@
 \maketitle
 
 % ============================================================
-\section{What the method proposes}
+\section{The proposed method}
 % ============================================================
 
-The detailed balance (DB) checker must verify
-$T(s_i\!\to\!s_j)\,\pi(s_i) = T(s_j\!\to\!s_i)\,\pi(s_j)$
-for every pair of states $(s_i,s_j)$ found by BFS.
-For a component of $N$ states this is $N(N{-}1)/2$ pairs.
-At \texttt{NGrid\,=\,3} ($N=504$) that is 126,756 pairs; at
-\texttt{NGrid\,=\,6} ($N\approx100{,}000$) it is $\sim5\times10^9$,
-which is infeasible.
+For a translation-invariant algorithm on an $L\times L$ periodic lattice,
+all nine translated copies of a state pair $(s, s')$ satisfy the same
+detailed balance (DB) condition.  A three-line argument shows: if DB holds
+for $(s,s')$, it holds for $(g{\cdot}s,\,g{\cdot}s')$ for every
+translation $g$, and vice versa.  Checking one representative per
+family of nine therefore suffices.  With full D4 symmetry ($8$ rotations
+and reflections $\times$ $9$ translations $= |G|=72$), the reduction is
+72-fold.
 
-The proposed speedup exploits the fact that for a translation-invariant
-algorithm on a periodic lattice, all nine translated copies of a
-configuration pair produce \emph{identical physics}.  If the pair
-$(s,s')$ satisfies DB, then every translated copy $(g{\cdot}s,\,g{\cdot}s')$
-automatically satisfies DB too, by a three-line argument:
-\begin{align*}
-  T(g{\cdot}s \to g{\cdot}s')\,\pi(g{\cdot}s)
-  &= T(s\to s')\,\pi(s)
-   = T(s'\to s)\,\pi(s')
-   = T(g{\cdot}s'\to g{\cdot}s)\,\pi(g{\cdot}s').
-\end{align*}
-The outer equalities use the symmetry of $T$ and $\pi$; the middle uses
-DB for the original pair.  The reverse direction holds identically:
-a violation for $(s,s')$ implies a violation for every translated copy.
-Therefore it suffices to check \emph{one pair per family of equivalent
-pairs}.
-
-For a $3\times3$ lattice with 9 translations ($|G|=9$), the 126,756
-pairs reduce to $126{,}756/9 = 14{,}084$.  Adding the 8 rotations and
-reflections of the square (D4, giving $|G|=72$) reduces this further to
-${\approx}1{,}760$ pairs.
-
-% ============================================================
-\section{Where the runtime actually comes from}
-% ============================================================
-
-Understanding whether the speedup is real requires understanding the
-current bottleneck precisely.
-
-The checker pipeline is: (1) BFS to find all $N$ states; (2) for each
-pair with non-zero $T$, build the symbolic DB expression; (3) deduplicate
-expressions by hash and run \texttt{FastChecker} on each unique one;
-(4) run \texttt{FullSimplify} on expressions \texttt{FastChecker} could
-not resolve; (5) scan for violations.
-
-Step (3) uses Mathematica's \texttt{Hash[]} on the symbolic expression
-object.  This matches \emph{syntactically identical} expressions — same
-atoms in the same positions — not merely mathematically equivalent ones.
-G-equivalent pairs (e.g.\ the same cluster geometry translated to a
-different lattice site) produce expressions that reference different site
-indices, different neighbor lists, and different random-variable
-assignments; they come out in different symbolic forms even though their
-mathematical content is the same.  They therefore hash differently, and
-the deduplication step does \emph{not} group them.
-
-Consequence: the ${\sim}3{,}000$ unique expressions reported for
-\texttt{NGrid\,=\,3} are genuinely distinct after all caching.  The
-orbit reduction would reduce this count by the full factor of $|G|$, not
-a fraction of it.
-
-\textbf{Step (4), the FullSimplify calls, is the runtime bottleneck.}
-For \texttt{vmmc\_lattice.wl} (polynomial conditions, no Erfc),
-\texttt{FastChecker} resolves most expressions quickly, but a
-fraction --- roughly 10\,\% of the unique expressions, or ${\sim}300$ at
-\texttt{NGrid\,=\,3} --- require \texttt{FullSimplify}, each taking
-${\sim}0.5$\,s.  At 300 calls $\times$ 0.5\,s, spread across 4 kernels,
-total time is $\approx$\,3 minutes, consistent with observed runtimes.
-
-% ============================================================
-\section{Quantitative impact}
-% ============================================================
-
-All rows below refer to the 504-state connected component found at
-\texttt{NGrid\,=\,3}.  The FullSimplify estimate assumes ${\sim}10\%$ of
-unique expressions require it and ${\sim}0.5$\,s each.
+The runtime bottleneck is \texttt{FullSimplify}, called on symbolic DB
+expressions that \texttt{FastChecker} could not resolve.  At
+\texttt{NGrid\,=\,3} ($N=504$), roughly 300 such calls at ${\sim}0.5$\,s
+each across 4 kernels give the observed ${\sim}3$\,min runtime.  Orbit
+reduction to $1/|G|$ of pairs would reduce these calls proportionally.
 
 \begin{center}
 \renewcommand{\arraystretch}{1.25}
 \begin{tabular}{lrrr}
 \toprule
- & No symmetry & Translations ($|G|{=}9$) & D4+trans.\ ($|G|{=}72$) \\
+(NGrid\,=\,3, $N$=504) & No symmetry & Translations ($|G|{=}9$) & D4+trans.\ ($|G|{=}72$) \\
 \midrule
 Pairs to check      & 126,756  & 14,084   & $\approx$1,760  \\
-Unique sym.\ exprs  & $\sim$3,000 & $\sim$333 & $\sim$42    \\
 FullSimplify calls  & $\sim$300   & $\sim$33  & $\sim$4     \\
 Estimated runtime   & 3\,min   & $\sim$20\,s & $\sim$2\,s  \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{These estimates are approximate.}  The FullSimplify fraction
-depends on the specific expressions generated, which varies with NGrid
-and the seed configuration.  The table should be read as order-of-magnitude
-guidance, not a performance guarantee.
-
-For \texttt{NGrid\,=\,6} the reduction from $5\times10^9$ to
-${\approx}1.7\times10^7$ pairs with $|G|{=}288$ is the difference between
-infeasible and potentially tractable.  The absolute runtime at that scale
-is harder to predict without profiling, since it depends on the fraction
-of expressions needing FullSimplify, which may differ from the
-NGrid\,=\,3 case.
+For \texttt{NGrid\,=\,6} ($N\approx100{,}000$) the full check requires
+${\sim}5\times10^9$ pairs and is infeasible.  With $|G|{=}288$, this
+reduces to ${\sim}1.7\times10^7$ --- potentially tractable.
 
 % ============================================================
-\section{Conditions for correctness, and their risks}
+\section{The black-box problem}
 % ============================================================
 
-The reduction is logically valid but depends on conditions that must be
-verified, not assumed.  A failure in any one of them can cause the
-checker to report PASS on a broken algorithm.
+The checker treats algorithms as black boxes: it supplies random-number
+inputs and records symbolic outputs.  The orbit reduction is only valid if
+$T(g{\cdot}s\to g{\cdot}s') = T(s\to s')$ for all pairs and all $g\in G$.
+This document asks: can this G-invariance property be verified in the same
+black-box way, without reading or interpreting source code?
 
-\textbf{1. The algorithm must actually be symmetric (critical).}
-The entire reduction assumes $T(g{\cdot}s\to g{\cdot}s') = T(s\to s')$.
-If this fails, families will contain pairs with different DB status, and
-the checker will certify a violating pair based on a non-violating
-representative.  \texttt{vmmc\_biased.wl} demonstrates this exactly: its
-rightward bias means a pair involving a rightward cluster move violates
-DB, but the $90^\circ$-rotated copy (an upward move, which is unbiased)
-satisfies DB.  With D4 symmetry assumed, the upward pair becomes the
-representative, and the checker incorrectly returns PASS.  Section 4
-below describes how to verify symmetry from the source code.
+\subsection*{Why the existing hash method is watertight but unhelpful here}
 
-\textbf{2. The connected component must be closed under the symmetry.}
-Every symmetry image $g{\cdot}s$ of every state $s$ in the component
-must also be in the same component.  If not, the effective symmetry group
-for that component is smaller than $G$, and the claimed speedup factor is
-wrong.  For \texttt{NGrid\,=\,3} with $|G|{=}9$, the component size
-$504 = 56\times9$ is consistent with this, but it should be confirmed
-programmatically, not inferred from arithmetic.
+The current checker deduplicates symbolic expressions using
+\texttt{Hash[]}: it skips re-evaluating a DB expression only when an
+identical expression (same hash, same syntactic form) has already been
+seen.  This is genuinely watertight --- it makes no assumption about
+G-invariance and never skips a pair unless the work is demonstrably
+redundant.
 
-\textbf{3. BFS must not be short-circuited using canonical states.}
-A tempting shortcut is to run BFS only from one representative state per
-symmetry family and check only pairs of representatives.  This is wrong.
-The canonical representative of $s$ is $g_0{\cdot}s$ and the canonical
-representative of $s'$ is $g_1{\cdot}s'$ for (generically) different
-$g_0\neq g_1$.  The transition $T(g_0{\cdot}s \to g_1{\cdot}s')$ is not
-equal to $T(s\to s')$ in general.  BFS must run on all $N$ states, and
-orbit reduction only controls which pairs are sent to the DB checker.
+The orbit reduction is a fundamentally different claim: it would skip a
+pair because a \emph{G-equivalent} pair was already checked --- not
+because the expressions were observed to be identical.  For this to be
+valid, G-equivalent pairs must produce identical DB expressions.  But
+G-equivalent pairs reference different site indices and different
+neighbor-list orderings, so they produce syntactically different symbolic
+expressions even when mathematically equal.  They hash differently.  The
+existing deduplication does not group them (this is why the
+${\sim}3{,}000$ unique expressions at \texttt{NGrid\,=\,3} do not already
+collapse to ${\sim}42$).
 
-\textbf{4. Canonical representatives must be computed per pair.}
-Some configurations are self-symmetric (a non-trivial $g$ fixes the
-state $g{\cdot}s=s$), making their family smaller than $|G|$.  The
-implementation must compute the canonical representative explicitly for
-every pair, not assume all families have size $|G|$ and skip by that
-factor.
+To confirm that G-equivalent pairs produce mathematically equal
+expressions, you would need \texttt{FullSimplify} on each pair in the
+orbit --- which costs as much as the DB check itself.  The verification
+tool is no cheaper than the thing it is meant to enable.
 
-\textbf{5. Rotation formulas must be correct for the lattice size.}
-The $90^\circ$ rotation $(r,c)\mapsto(c,\,L{-}1{-}r)$ maps lattice sites
-to lattice sites for any $L$, but an off-by-one error produces a mapping
-that is not a true bijection.  This bug is silent: the code runs without
-error but computes wrong orbit representatives, potentially skipping pairs
-that were never actually certified.
+\subsection*{The single-microstate counterexample}
 
-% ============================================================
-\section{Verifying position-independence from source code}
-% ============================================================
+Suppose an algorithm is G-invariant for every state \emph{except} one
+specific microstate $s^*$, where the transition probabilities are
+slightly wrong.  A black-box checker that tests only a sample of states
+could never detect this, because the probability of including $s^*$ in a
+small sample from $N=504$ (or $N=100{,}000$) states is tiny.
 
-The symmetry reduction can only be trusted if the algorithm file is
-genuinely position-independent.  For \texttt{vmmc\_lattice.wl}-style
-algorithms, this can be checked by reading three specific parts of the
-source code.
+The only guarantee comes from testing \emph{every} state.  But testing
+all $N$ states means computing symbolic DB expressions for all $N(N-1)/2$
+pairs --- which is exactly the cost of the full check.  There is no
+intermediate regime: either you accept an unverified assumption, or you
+pay the full cost.
 
-\textbf{Seed selection.}  Look for the line that chooses the seed
-particle.  It should be \texttt{RandomChoice[occupied]} where
-\texttt{occupied} is the list of all non-empty sites, with no weighting
-by position.  Any position-dependent weighting (e.g.\ preferring sites
-near the lattice centre) would break translation invariance.
+This is not a hypothetical concern.  The \texttt{vmmc\_biased.wl}
+algorithm fails G-invariance specifically because rightward-displaced
+pairs behave differently from the rest, and a checker that happened not
+to examine those pairs would miss the violation entirely.
 
-\textbf{Displacement selection.}  Look for the line that chooses the
-proposed move direction.  For translation invariance it must be
-\texttt{RandomChoice[\$displacements]} where \texttt{\$displacements}
-is a fixed list that does not depend on the current state or on which
-site was seeded.  For D4 invariance additionally, the list must be closed
-under rotation and reflection: the uniform box
-$\{(\pm1,0),(0,\pm1),(\pm1,\pm1)\}$ satisfies this; any list that
-over-represents one direction (as in \texttt{vmmc\_biased.wl}) does not.
+\subsection*{The fundamental impossibility}
 
-\textbf{Energy computation.}  Find the function that computes pair
-interaction energy.  It should call \texttt{couplingJ[a,\,b,\,d2]} where
-\texttt{d2} is the squared \emph{periodic} distance between the two
-sites:
-\[
-  d^2 = \min(\Delta r,\;L{-}\Delta r)^2 + \min(\Delta c,\;L{-}\Delta c)^2,
-\]
-with $\Delta r = |r_1-r_2|$ and $\Delta c = |c_1-c_2|$.  The distance
-formula must use the minimum-image convention (the \texttt{min} terms)
-to be periodic-boundary-correct.  If the energy instead uses raw
-coordinate differences $\Delta r = r_1-r_2$ (not wrapped), it will not
-be translation-invariant at the lattice boundary.  For D4 invariance,
-note that $90^\circ$ rotation swaps $\Delta r$ and $\Delta c$ and
-negates one; since both appear squared and summed, $d^2$ is unchanged.
-
-These three checks can be performed by reading fewer than 20 lines of
-any algorithm file.  They are necessary but not sufficient: they confirm
-that the \emph{stated logic} is symmetric, but not that the supporting
-library functions (\texttt{\$neighborsD2}, \texttt{\$applyDir}, etc.)
-implement that logic correctly.  Those library functions should be
-independently verified once and their symmetry properties documented.
+Any reliable black-box G-invariance check must, in the worst case, test
+all $N$ states and all $N(N-1)/2$ pairs between them.  This is not a
+limitation of cleverness; it follows from the counterexample above: no
+sampling-based test can exclude the possibility that one untested state
+violates G-invariance.  Reliable G-invariance verification therefore
+costs $O(N^2)$ symbolic evaluations --- the same asymptotic cost as the
+full DB check.  The speedup the orbit reduction provides is exactly
+consumed by the cost of verifying that the speedup is valid.
 
 % ============================================================
-\section{Is it worth implementing?}
+\section{Alternative approaches worth considering}
 % ============================================================
 
-\textbf{At \texttt{NGrid\,=\,3} (current scale):} Yes, the speedup is
-real.  The hash-based deduplication does not capture G-equivalence, so
-the orbit reduction genuinely reduces FullSimplify calls from ${\sim}300$
-to ${\sim}4$ with D4+translations, cutting 3 minutes to ${\sim}2$
-seconds.  However, 3 minutes is already tolerable for a correctness
-check.  The implementation requires satisfying five non-trivial
-correctness conditions, and a bug in any one of them introduces silent
-false negatives.  The benefit at this scale does not clearly outweigh the
-implementation risk.
+\textbf{Probabilistic verification with known risk.}  Check G-invariance
+for a random sample of state pairs and accept a small residual probability
+of false negatives.  For $k$ randomly sampled pairs, a violation affecting
+fraction $f$ of all pairs is missed with probability $(1-f)^k$.  With
+$k=100$ samples and $f=0.01$ (1\% of pairs affected), the miss probability
+is $(0.99)^{100}\approx0.37$ --- unacceptably high for a correctness
+checker.  This approach is appropriate for informal exploration but not for
+publication-quality checking.
 
-\textbf{At \texttt{NGrid\,=\,6} and beyond:} The checker is entirely
-infeasible without orbit reduction.  $5\times10^9$ pairs cannot be
-constructed, let alone evaluated, in any reasonable time.  The orbit
-reduction to ${\sim}1.7\times10^7$ pairs is not an optimisation; it is
-a prerequisite for the checker to run at all.  At this scale the
-implementation is worth doing despite the complexity.
+\textbf{Cross-checking within orbits.}  Check the orbit representative
+\emph{and} one randomly chosen orbit member, at a total cost of $2/|G|$
+per orbit.  If the two DB outcomes disagree, G-invariance has
+demonstrably failed for that orbit.  If they agree, either G-invariance
+holds or both checked members happen to have the same (wrong) DB status.
+This halves the speedup factor ($|G|/2$ instead of $|G|$) while catching
+gross G-invariance failures.  It does not provide a correctness guarantee,
+but it converts an invisible false negative into a detectable inconsistency
+for the most common failure mode.
 
-\textbf{Recommendation:} Do not implement for \texttt{NGrid\,=\,3}.
-Implement --- with all five correctness conditions satisfied explicitly
---- when \texttt{NGrid\,=\,5} or higher is a target.
+\textbf{Algebraic canonicalisation before hashing.}  The reason
+G-equivalent pairs hash differently is that the symbolic expressions
+reference absolute site indices.  If the seqBernoulli output were
+normalised to replace absolute sites with relative positions before
+hashing --- expressing all couplingJ atoms in terms of the seed particle's
+position rather than the lattice origin --- G-equivalent pairs would
+produce identical expressions and identical hashes.  This would make the
+existing hash deduplication automatically capture G-orbits, with no
+separate verification step needed.  The normalisation step would be
+applied to every expression as it is generated, adding constant overhead
+per expression but no asymptotic cost.  This is the most promising avenue
+and deserves further investigation, but implementing it requires
+understanding the structure of the seqBernoulli output (which
+expressions reference sites, how to re-express them in seed-relative
+coordinates), which is non-trivial.
+
+\textbf{Algorithm metadata interface.}  Require algorithm files to declare
+their symmetry group explicitly (\texttt{\$symmetryGroup = "D4Translation"}).
+The checker uses this declaration to apply the orbit reduction and takes
+the declaration at face value.  This is black-box in the sense of not
+requiring source-code parsing, but the correctness burden shifts to the
+algorithm author: an incorrect declaration introduces undetected false
+negatives.
+
+% ============================================================
+\section{Conclusion: is the method feasible?}
+% ============================================================
+
+\textbf{At \texttt{NGrid\,=\,3}:} No.  The orbit reduction gives
+${\sim}9\times$ speedup on FullSimplify calls, cutting 3\,min to
+${\sim}20$\,s for translations (or ${\sim}2$\,s for D4).  But reliable
+G-invariance verification has the same asymptotic cost as the full check.
+The 3\,min runtime is already acceptable, and the implementation introduces
+seven correctness conditions and the risk of silent false negatives.  Not
+worth implementing.
+
+\textbf{At \texttt{NGrid\,=\,6} and above:}  The full check is infeasible
+regardless.  The orbit reduction is a prerequisite for the checker to run
+at all.  At this scale the question is not ``is the speedup worth it?''
+but ``can we verify G-invariance at all?''  The only practical option is
+a brief source-code inspection (three specific checks described below),
+accepted as a necessary precondition rather than an automated step.
+
+\textbf{For \texttt{vmmc\_lattice.wl}-style algorithms, the source-code
+check takes under five minutes and reduces to three observations:}
+(1) seed selection is \texttt{RandomChoice[occupied]} with no
+position-dependent weighting; (2) displacement selection is
+\texttt{RandomChoice[\$displacements]} where \texttt{\$displacements} is a
+fixed list that does not depend on the current state; (3) the energy
+function calls \texttt{couplingJ[a, b, d2]} where \texttt{d2} is computed
+using the minimum-image periodic distance formula
+$\min(\Delta r,L{-}\Delta r)^2 + \min(\Delta c,L{-}\Delta c)^2$.
+
+\textbf{Overall verdict:}  The orbit reduction is worth implementing
+\emph{only} for \texttt{NGrid\,$\geq$\,5}, and \emph{only} if the
+source-code precondition is accepted.  The pure black-box ideal ---
+verifying G-invariance without reading source code and without paying the
+full DB check cost --- is unachievable.  Algebraic canonicalisation of the
+seqBernoulli output is the one avenue that might bridge this gap; if it
+can be implemented, it would make G-invariance verification automatic and
+free.
 
 \end{document}
