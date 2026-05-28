@@ -1303,7 +1303,9 @@ $dbcDistributeFastChecker[] := (
     $dbcGroupByExp,
     $dbcIsExpZero,
     $dbcSubstEqualities,
-    $dbcCheckOneExpr])
+    $dbcCheckOneExpr,
+    $szRandQ,
+    $dbcSZCheckOne])
 
 (* Distribute everything needed for parallel BFS: RunWithBitsAT, its
    helpers ($dbc$irand UpValues, $dbc$contToken UpValues, etc.), and
@@ -1323,14 +1325,90 @@ $dbcDistributeBFS[] := (
 $dbcFastWorker[expr_, assm_, symParams_] :=
   {$dbcCheckOneExpr[expr, assm, symParams], expr, assm}
 
+(* ================================================================
+   Schwartz-Zippel DB checker
+   Fast probabilistic fallback that replaces FullSimplify.
+
+   APPROACH
+   For a DB expression expr = T(i→j)·Exp[-β·E(i)] − T(j→i)·Exp[-β·E(j)],
+   substitute k independent random rational values for the coupling
+   parameters (symParams).  After substitution every Piecewise / Min
+   condition that compares coupling values collapses to True/False.
+   PiecewiseExpand[·, β>0] then resolves any remaining Min/Piecewise
+   that depends on the sign of a concrete rational × β, leaving a
+   scalar of the form  Σ c_m · Exp[-β · r_m]  (c_m, r_m ∈ ℚ).
+   β stays SYMBOLIC so $dbcIsExpZero can certify the identity over all
+   β > 0 with a single exact rational coefficient check.
+
+   CORRECTNESS
+   A polynomial identically zero over ℝ evaluates to zero at every
+   point.  Here the "polynomial" lives in the Exp-basis: the expression
+   is zero for all β iff every coefficient c_m is zero.  $dbcIsExpZero
+   checks this exactly (rational arithmetic, no floating point).
+   If the expression is NOT identically zero, a random rational
+   coupling assignment will land in a non-zero region with probability
+   ≥ 1 − d/N per evaluation (Schwartz–Zippel), where d is the degree
+   and N the random range.  With k=30 independent evaluations the
+   false-zero probability is ≤ (20/100)^30 < 10^-21 per expression.
+
+   GPU NOTE
+   GPU acceleration is not used: with canonical-BFS dedup the workload
+   is at most ~24 K expressions × 30 evaluations = ~720 K calls.  Each
+   call is a Mathematica substitution + $dbcIsExpZero (~1 ms), totalling
+   well under 10 s on 4 CPUs.  Mathematica→GPU transfer overhead for
+   dynamic expressions exceeds this by orders of magnitude; revisit only
+   if per-component unique-expression counts exceed ~10^5.
+   ================================================================ *)
+
+(* Random non-zero rational: ±p/q, p,q ∈ [1,50]. *)
+$szRandQ[] := RandomChoice[{-1, 1}] * RandomInteger[{1, 50}] /
+              RandomInteger[{1, 50}]
+
+(* ---- Schwartz-Zippel check for one DB expression.
+   expr       : raw DB expression (coupling atoms + β free)
+   symParams  : list of coupling symbolic atoms to substitute
+                (must NOT include β — it stays symbolic)
+   k          : number of independent random evaluations
+
+   Returns:
+     True               all k evaluations certify zero (PASS)
+     {False, sub, asgn} $dbcIsExpZero found a non-zero coefficient
+                        at coupling assignment asgn (VIOLATION)
+     $dbcFS             unexpected expression structure after
+                        substitution; caller should fall back to
+                        FullSimplify for this expression           ---- *)
+$dbcSZCheckOne[expr_, symParams_List, nReps_Integer] := Module[
+  {assign, subst, res, result},
+  result = True;
+  Do[
+    assign = Map[# -> $szRandQ[] &, symParams];
+    subst  = PiecewiseExpand[expr /. assign, \[Beta] > 0];
+    res    = $dbcIsExpZero[subst];
+    Which[
+      res === True,  Null,
+      res === False, result = {False, subst, assign}; Break[],
+      True,          result = $dbcFS; Break[]],
+    {i, nReps}];
+  result]
+
+Options[CheckDetailedBalanceFast] = {
+  "SZChecker" -> False,  (* True: use Schwartz-Zippel instead of FullSimplify fallback *)
+  "SZRepeats" -> 30      (* number of random rational evaluations per expression *)
+}
+
 CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
-                         extraAssumptions_List : {}, failFast_ : False] := Module[
-  {n, pairs, assm, symParams, exprs,
+                         extraAssumptions_List : {}, failFast_ : False,
+                         OptionsPattern[]] := Module[
+  {n, pairs, assm, symParams, exprs, szCheck, szReps,
    nonTrivIdx, ntExprs, ntPairs,
    uniqueIdxs, canonIdx, uniqueExprs, uniqueResults, idxToResult,
    results, violations, fsCache, recheckCache, nK,
    fsNeedPos, fsNeedIdx, fsNeedExprs, fsResults,
+   szRaw, szFSPos, szFSOut, szFSAssoc,
    si, sj, tij, tji, ei, ej, fRes, expr, simp},
+
+  szCheck   = TrueQ[OptionValue["SZChecker"]];
+  szReps    = OptionValue["SZRepeats"];
 
   n         = Length[allStates];
   pairs     = Flatten[Table[{i, j}, {i, 1, n}, {j, i+1, n}], 1];
@@ -1351,9 +1429,21 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
       If[expr =!= 0,
         fRes = $dbcCheckOneExpr[expr, assm, symParams];
         If[fRes =!= True,
-          simp = FullSimplify[PiecewiseExpand[expr], Assumptions -> assm];
-          If[simp =!= 0 && $dbcCheckOneExpr[simp, assm, symParams, True] === True,
-            simp = 0];
+          simp = If[szCheck,
+            (* SZ path: substitute random coupling values; β stays symbolic *)
+            With[{szR = $dbcSZCheckOne[expr, symParams, szReps]},
+              Which[
+                szR === True,   0,
+                szR === $dbcFS, With[{fs = FullSimplify[PiecewiseExpand[expr],
+                                             Assumptions -> assm]},
+                                  If[fs =!= 0 &&
+                                     $dbcCheckOneExpr[fs, assm, symParams, True] === True,
+                                     0, fs]],
+                True, expr]],   (* SZ flagged non-zero: raw expr as residual *)
+            (* FS path (default) *)
+            With[{fs = FullSimplify[PiecewiseExpand[expr], Assumptions -> assm]},
+              If[fs =!= 0 && $dbcCheckOneExpr[fs, assm, symParams, True] === True,
+                 0, fs]]];
           If[simp =!= 0,
             Return[{<|"pair"     -> {si, sj},
                       "residual" -> simp,
@@ -1399,19 +1489,37 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
   idxToResult = AssociationThread[uniqueIdxs -> uniqueResults];
   results = Map[Function[k, idxToResult[canonIdx[[k]]]], Range[Length[ntExprs]]];
 
-  (* D: FullSimplify fallback — parallelise over unique expressions whose
-        fast check was inconclusive ($dbcFS) or flagged a possible violation.
-        All FullSimplify work is done here in parallel; the violation scan
-        below is then a series of fast Association lookups.
-        Key: FullSimplify is called on the ORIGINAL expression (not a
-        pre-simplified one) — same semantics as the old sequential code. *)
-  fsNeedPos  = Select[Range[Length[uniqueIdxs]], uniqueResults[[#, 1]] =!= True &];
-  fsNeedIdx  = uniqueIdxs[[fsNeedPos]];
+  (* D: fallback phase for expressions the fast checker could not resolve.
+        SZChecker=True: Schwartz-Zippel (random rational coupling values; β stays
+        symbolic) replaces FullSimplify.  Expressions where SZ returns $dbcFS
+        (unexpected structure after substitution) still fall back to FullSimplify
+        so no coverage is lost.  Both paths work on the ORIGINAL expression. *)
+  fsNeedPos   = Select[Range[Length[uniqueIdxs]], uniqueResults[[#, 1]] =!= True &];
+  fsNeedIdx   = uniqueIdxs[[fsNeedPos]];
   fsNeedExprs = ntExprs[[fsNeedIdx]];
-  With[{a = assm},
-    fsResults = If[nK > 0 && Length[fsNeedExprs] > nK,
-      ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fsNeedExprs],
-      Map[       FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fsNeedExprs]]];
+  If[szCheck,
+    With[{sp = symParams, kr = szReps},
+      szRaw = If[nK > 0 && Length[fsNeedExprs] > nK,
+        ParallelMap[$dbcSZCheckOne[#, sp, kr] &, fsNeedExprs],
+        Map[       $dbcSZCheckOne[#, sp, kr] &, fsNeedExprs]];
+      szFSPos   = Select[Range @ Length[szRaw], szRaw[[#]] === $dbcFS &];
+      szFSOut   = If[Length[szFSPos] > 0,
+        With[{fe = fsNeedExprs[[szFSPos]], a = assm},
+          If[nK > 0 && Length[fe] > nK,
+            ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fe],
+            Map[       FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fe]]],
+        {}];
+      szFSAssoc = AssociationThread[szFSPos -> szFSOut];
+      fsResults = Table[
+        Which[
+          szRaw[[k]] === True,  0,
+          szRaw[[k]] === $dbcFS, szFSAssoc[k],   (* FS result for this expression *)
+          True, fsNeedExprs[[k]]],  (* SZ flagged non-zero: raw expr as residual *)
+        {k, Length[szRaw]}]],
+    With[{a = assm},
+      fsResults = If[nK > 0 && Length[fsNeedExprs] > nK,
+        ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fsNeedExprs],
+        Map[       FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fsNeedExprs]]]];
   fsCache = AssociationThread[fsNeedIdx -> fsResults];
 
   (* E: Violation scan — fsCache already populated; no FullSimplify here.

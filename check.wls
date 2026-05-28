@@ -78,6 +78,9 @@ If[Length[posArgs] < 1,
   Print["  NSteps=N             MCMC steps per system (default 50000)"];
   Print["  MaxBitDepth=N        BFS depth cap (default 20)"];
   Print["  Verbose=True/False   Per-state BFS output (default False)"];
+  Print["  FastChecker=1        Use Exp-polynomial fast path (recommended)"];
+  Print["  SZChecker=1          Use Schwartz-Zippel fallback instead of FullSimplify (needs FastChecker=1)"];
+  Print["  SZRepeats=N          Random evaluations per expression for SZChecker (default 30)"];
   Print["  FailFast=1           Stop on first violation; print T, E, residual"];
   $dbcExit[1]];
 
@@ -88,6 +91,8 @@ nSteps          = 50000;
 maxBitDepth     = 20;
 verbose         = False;
 fastChecker     = False;   (* FastChecker=1: use Exp-polynomial fast path *)
+szChecker       = False;   (* SZChecker=1: Schwartz-Zippel fallback (needs FastChecker=1) *)
+szRepeats       = 30;      (* SZRepeats=N: random evaluations per expression (default 30) *)
 failFast        = False;   (* FailFast=1: stop+print debug info on first violation *)
 seedBitStrings  = None;    (* SeedBitStrings=X,Y: test specific bit strings *)
 physFidelity    = False;   (* PhysFidelity=1: compare T_MC to T_phys (Glauber) *)
@@ -102,6 +107,8 @@ Do[
   If[StringMatchQ[opt, "MaxBitDepth="    ~~ __], maxBitDepth    = ToExpression[StringDrop[opt, 12]]];
   If[StringMatchQ[opt, "Verbose="        ~~ __], verbose        = ToExpression[StringDrop[opt,  8]]];
   If[StringMatchQ[opt, "FastChecker="    ~~ __], fastChecker    = (StringDrop[opt, 12] =!= "0")];
+  If[StringMatchQ[opt, "SZChecker="     ~~ __], szChecker      = (StringDrop[opt, 10] =!= "0")];
+  If[StringMatchQ[opt, "SZRepeats="     ~~ __], szRepeats      = ToExpression[StringDrop[opt, 10]]];
   If[StringMatchQ[opt, "FailFast="       ~~ __], failFast       = (StringDrop[opt,  9] =!= "0")];
   If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")];
   If[StringMatchQ[opt, "MaxComponents="  ~~ __], maxComponents  = ToExpression[StringDrop[opt, 14]]];
@@ -337,7 +344,10 @@ Print["Mode:          ", mode];
 If[mode =!= "Symbolic", Print["NSteps:        ", nSteps]];
 Print["MaxBitDepth:   ", maxBitDepth];
 If[fastChecker && mode =!= "Numerical",
-  Print["SymChecker:    FastChecker (Exp-polynomial; FullSimplify fallback)"],
+  Print["SymChecker:    FastChecker (Exp-polynomial; " <>
+    If[szChecker,
+      "Schwartz-Zippel fallback; k=" <> ToString[szRepeats] <> " evals)",
+      "FullSimplify fallback)"]],
   If[mode =!= "Numerical",
     Print["SymChecker:    FullSimplify (standard)"]]];
 If[failFast && mode =!= "Numerical",
@@ -488,7 +498,8 @@ $loopBody[bitString_List] := Catch[
   symResult = "-"; failStr = "-";
   If[mode =!= "Numerical",
     With[{viol = If[fastChecker,
-                  CheckDetailedBalanceFast[matrix, allStates, $energy, compSymAssumptions, failFast],
+                  CheckDetailedBalanceFast[matrix, allStates, $energy, compSymAssumptions, failFast,
+                                           "SZChecker" -> szChecker, "SZRepeats" -> szRepeats],
                   CheckDetailedBalance[    matrix, allStates, $energy, compSymAssumptions, failFast]]},
       symResult = If[viol === {}, "PASS", "FAIL"];
       failStr   = If[viol === {}, "0",    ToString[Length[viol]]];

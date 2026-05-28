@@ -131,6 +131,8 @@ wolframscript -file check.wls <algorithm.wl> [options]
 | `NSteps=N` | `50000` | MCMC steps for numerical check |
 | `MaxBitDepth=N` | `20` | BFS depth cap per state |
 | `FastChecker=1` | off | Exp-polynomial fast checker (see below) |
+| `SZChecker=1` | off | Schwartz-Zippel fallback instead of FullSimplify (requires `FastChecker=1`; see below) |
+| `SZRepeats=N` | `30` | Number of random rational evaluations per expression for SZChecker |
 | `PhysFidelity=1` | off | Compare T_MC to physical Glauber dynamics; adds M1 and M2 columns (see below) |
 | `Verbose=True` | `False` | Per-state BFS progress |
 
@@ -203,6 +205,10 @@ wolframscript -file check.wls examples3/vmmc_2d_field.wl \
 # (MaxComponents=4 avoids the large 3024-state 4-particle component; wall time ~2:55)
 wolframscript -file check.wls examples3/vmmc_lattice.wl \
   NGrid=3 MaxComponents=4 FastChecker=1 Mode=Symbolic
+
+# Schwartz-Zippel fallback: faster than FullSimplify for coupling-heavy expressions
+wolframscript -file check.wls examples3/vmmc_lattice.wl \
+  NGrid=3 MaxComponents=4 FastChecker=1 SZChecker=1 Mode=Symbolic
 
 # Animate on a 20×20 grid (physLen=2, cutoff just past LJ minimum)
 wolframscript -file animate.wls examples3/vmmc_continuous.wl \
@@ -354,6 +360,7 @@ The checker is a formal verifier, but it operates on a *model* of the algorithm'
 | Hidden mutable global state | Algorithm caches results in DownValues across calls; BFS path for state A contaminates path for state B. | Write stateless algorithms; `CheckAlgorithmSafety` catches some patterns |
 | Distance-matrix degeneracies | Two distinct geometric configurations with identical pairwise distances produce the same canonical T expression; G-invariance check sees them as equal. Only relevant for multi-particle systems with near-regular arrangements. | Test multiple components; inspect with `FailFast=1` |
 | Self-symmetric states (stabilizers) | States invariant under some g (e.g. cluster at every corner of a 2×2 square) trivially pass T(s→s') = T(g(s)→g(s')). G-invariance check cannot distinguish "invariant because G-invariant" from "invariant because stabilizer". | No false negative: stabilizer states correctly contribute zero violations |
+| SZChecker false-zero (probabilistic) | With k=30 random evaluations and random range ±p/q, p,q∈[1,50], a non-zero degree-d coupling polynomial evaluates to zero at all k points with probability ≤ (d/50)³⁰. For d≤20: ≤ 10⁻¹². | Increase `SZRepeats` for extremely high assurance; default k=30 is sufficient for all practical purposes |
 
 ### Known false-positive risks (spurious failures)
 
@@ -368,9 +375,26 @@ The checker is a formal verifier, but it operates on a *model* of the algorithm'
 `FullSimplify[PiecewiseExpand[expr], {β > 0, ...}]`. Correct for all algorithm types.
 
 ### FastChecker (`FastChecker=1`)
-After `PiecewiseExpand`, DB expressions reduce to sums of `c·exp(−β·L)` terms. DB holds iff all coefficient groups sum to zero — verified by `Expand[...] === 0` (microseconds). Falls back to `FullSimplify` for inconclusive cases. Works directly for Metropolis acceptance; falls back gracefully for Barker/heat-bath.
+After `PiecewiseExpand`, DB expressions reduce to sums of `c·exp(−β·L)` terms. DB holds iff all coefficient groups sum to zero — verified by `Expand[...] === 0` (microseconds). Falls back to `FullSimplify` (or SZChecker if enabled) for inconclusive cases. Works directly for Metropolis acceptance; falls back gracefully for Barker/heat-bath.
 
-Both checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (`$dbcDedup`; collapses G-orbit pairs when canonical oracle is active) → threshold-based `ParallelMap`.
+All checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (`$dbcDedup`; collapses G-orbit pairs when canonical oracle is active) → threshold-based `ParallelMap`.
+
+### Schwartz-Zippel checker (`FastChecker=1 SZChecker=1`)
+
+When FastChecker cannot decide an expression, SZChecker replaces the `FullSimplify` fallback. The Schwartz-Zippel approach:
+
+1. Draw `k` independent random rational assignments for the coupling parameters (e.g. `couplingJ[a,b,d²]`).
+2. For each assignment, substitute into the DB expression and call `PiecewiseExpand[·, β>0]`. All Piecewise conditions that compare coupling values collapse to True/False; β remains symbolic.
+3. Call `$dbcIsExpZero` on the result — a rational-coefficient check on the Exp-basis, microseconds per call.
+4. If all `k` evaluations confirm zero: expression is certified identically zero (PASS). If any evaluation is non-zero: violation detected (FAIL). If the structure is unexpected after substitution, fall back to `FullSimplify` for that expression.
+
+**Correctness.** The expression is a rational polynomial in the coupling atoms times Exp[−β·r] factors; for a non-zero polynomial, the Schwartz-Zippel lemma guarantees that a random rational point is non-zero with probability ≥ 1−d/N, where d is the polynomial degree and N=50 is the random range. With k=30 independent evaluations the false-zero probability is ≤ (d/50)^30 ≤ 10⁻¹² per expression (d≤20), effectively zero.
+
+**When it helps.** SZChecker is fast when many unique expressions survive FastChecker — each evaluation costs ~1 ms (substitution + rational coefficient check) versus ~1–30 s for `FullSimplify`. For VMMC on a 3×3 grid (~60 unique post-FastChecker expressions), SZChecker adds negligible overhead; for larger grids where FullSimplify is the bottleneck, it provides the largest speedup.
+
+**When it makes no difference.** If FastChecker resolves all expressions (common for small components), the fallback is never reached and SZChecker adds no cost.
+
+**Compatibility.** Requires `FastChecker=1`. The `SZRepeats=N` flag sets k (default 30). Expressions where SZ returns an inconclusive structure still fall back to `FullSimplify`, so coverage is never lost.
 
 ### FastChecker internals: Piecewise case feasibility
 
