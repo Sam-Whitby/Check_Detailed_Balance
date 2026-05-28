@@ -27,6 +27,8 @@ If[$nKernels > 0,
   Print["Parallel: ", $nKernels, " kernels launched."],
   Print["Note: parallel kernel launch failed — running single-threaded."]];
 
+$dbcExit[code_Integer] := (If[$nKernels > 0, CloseKernels[]]; Exit[code]);
+
 (* ---- Parse command-line arguments ---- *)
 args = $ScriptCommandLine;
 If[Length[args] >= 1 && StringMatchQ[args[[1]], ___ ~~ "report.wls"],
@@ -53,7 +55,7 @@ If[Length[posArgs] < 1,
   Print["  ShowT=True/False       Include transition matrix (default True)"];
   Print["  DoNumerical=True/False Run numerical MCMC + frequency plot (default True)"];
   Print["  PrintMatrix=True/False Print transition matrix as LaTeX to terminal (default False)"];
-  Exit[1]];
+  $dbcExit[1]];
 
 (* ---- Option defaults ---- *)
 bitStringArg = None;
@@ -78,11 +80,11 @@ Do[
 
 If[bitStringArg === None,
   Print["ERROR: BitString argument is required (e.g. BitString=11101)"];
-  Exit[1]];
+  $dbcExit[1]];
 
 If[!StringMatchQ[bitStringArg, ("0" | "1")..],
   Print["ERROR: BitString must contain only 0s and 1s, got: ", bitStringArg];
-  Exit[1]];
+  $dbcExit[1]];
 
 bitString = ToExpression /@ Characters[bitStringArg];
 
@@ -90,7 +92,7 @@ bitString = ToExpression /@ Characters[bitStringArg];
 algFile = posArgs[[1]];
 If[!FileExistsQ[algFile], algFile = scriptDir <> algFile];
 If[!FileExistsQ[algFile],
-  Print["ERROR: File not found: ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: File not found: ", posArgs[[1]]]; $dbcExit[1]];
 
 ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, DisplayState,
          fieldF, couplingJ,
@@ -100,13 +102,13 @@ Print["Loading: ", algFile];
 Get[algFile];
 
 If[Length[DownValues[Algorithm]] == 0,
-  Print["ERROR: 'Algorithm' not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'Algorithm' not defined in ", posArgs[[1]]]; $dbcExit[1]];
 If[Length[DownValues[energy]] == 0,
-  Print["ERROR: 'energy' not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'energy' not defined in ", posArgs[[1]]]; $dbcExit[1]];
 If[Length[DownValues[BitsToState]] == 0,
-  Print["ERROR: 'BitsToState' not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'BitsToState' not defined in ", posArgs[[1]]]; $dbcExit[1]];
 If[!ValueQ[numBeta] || !NumericQ[numBeta],
-  Print["ERROR: 'numBeta' (numeric) not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'numBeta' (numeric) not defined in ", posArgs[[1]]]; $dbcExit[1]];
 
 (* ---- Clear abstract parameters declared by the algorithm file ----
    Mirrors the same block in check.wls.  Without this, parameters such as
@@ -122,7 +124,7 @@ If[ListQ[$checkerAbstractParams] && AllTrue[$checkerAbstractParams, StringQ],
   Scan[ClearAll, $checkerAbstractParams];
   bound = Select[$checkerAbstractParams, ToExpression["ValueQ[" <> # <> "]"] &];
   If[bound =!= {},
-    Print["ERROR: parameter remains bound after clearing: ", bound]; Exit[1]];
+    Print["ERROR: parameter remains bound after clearing: ", bound]; $dbcExit[1]];
   Print["Abstract params cleared: ", $checkerAbstractParams]];
 
 $alg     = Algorithm;
@@ -140,7 +142,7 @@ $checkCouplingSymmetry[] := (
           "  b=", $coupSymViolations[[1]]["b"],
           "  d2=", $coupSymViolations[[1]]["d2"],
           "  J[a,b]-J[b,a] = ", $coupSymViolations[[1]]["asymmetry"]];
-    Exit[1]];
+    $dbcExit[1]];
   Print["couplingJ symmetry: PASS"]);
 Which[
   Length[DownValues[couplingJ]] > 0,
@@ -155,7 +157,7 @@ state = Check[BitsToState[bitString], $Failed];
 If[state === $Failed || state === None,
   Print["ERROR: BitString ", bitStringArg,
         " does not map to a valid state (BitsToState returned None or failed)."];
-  Exit[1]];
+  $dbcExit[1]];
 
 Print["Seed state: ", state];
 
@@ -167,7 +169,7 @@ treeData = BuildTreeAT[state, $alg,
              "Verbose"     -> verbose];
 
 If[MatchQ[treeData, $dbc$cantHandle[_]],
-  Print["ERROR: BFS failed -- ", treeData[[1]]]; Exit[1]];
+  Print["ERROR: BFS failed -- ", treeData[[1]]]; $dbcExit[1]];
 
 allStates = Sort @ Keys[treeData];
 matrix    = TreeATToMatrix[treeData];
@@ -279,3 +281,4 @@ reportArgs = <|
 
 Print["\nGenerating notebook report ..."];
 ExportReportNotebook[reportArgs];
+If[$nKernels > 0, CloseKernels[]];

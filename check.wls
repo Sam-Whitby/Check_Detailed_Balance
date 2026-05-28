@@ -48,6 +48,10 @@ If[$nKernels > 0,
 (* Distribute fast-checker helpers to subkernels (no-op if no kernels) *)
 If[$nKernels > 0, $dbcDistributeFastChecker[]];
 
+(* Clean-exit helper: always close sub-kernels before exiting so no
+   WolframKernel processes are left consuming CPU after the script ends. *)
+$dbcExit[code_Integer] := (If[$nKernels > 0, CloseKernels[]]; Exit[code]);
+
 (* ---- Parse command-line arguments ---- *)
 args = $ScriptCommandLine;
 If[Length[args] >= 1 && StringMatchQ[args[[1]], ___ ~~ "check.wls"],
@@ -75,7 +79,7 @@ If[Length[posArgs] < 1,
   Print["  MaxBitDepth=N        BFS depth cap (default 20)"];
   Print["  Verbose=True/False   Per-state BFS output (default False)"];
   Print["  FailFast=1           Stop on first violation; print T, E, residual"];
-  Exit[1]];
+  $dbcExit[1]];
 
 (* ---- Option defaults ---- *)
 maxBitString    = "11111111";
@@ -107,13 +111,13 @@ Do[
 (* ---- Validate MaxBitString ---- *)
 If[!StringMatchQ[maxBitString, ("0" | "1")..],
   Print["ERROR: MaxBitString must contain only 0s and 1s, got: ", maxBitString];
-  Exit[1]];
+  $dbcExit[1]];
 
 (* ---- Resolve file path ---- *)
 algFile = posArgs[[1]];
 If[!FileExistsQ[algFile], algFile = scriptDir <> algFile];
 If[!FileExistsQ[algFile],
-  Print["ERROR: File not found: ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: File not found: ", posArgs[[1]]]; $dbcExit[1]];
 
 (* ---- Load algorithm file ---- *)
 ClearAll[Algorithm, energy, BitsToState, numBeta, symParams, DynamicSymParams, DisplayState,
@@ -142,7 +146,7 @@ If[ListQ[$checkerAbstractParams] && AllTrue[$checkerAbstractParams, StringQ],
   bound = Select[$checkerAbstractParams, ToExpression["ValueQ[" <> # <> "]"] &];
   If[bound =!= {},
     Print["ERROR: parameter remains bound after clearing: ", bound];
-    Exit[1]];
+    $dbcExit[1]];
   Print["Abstract params cleared: ", $checkerAbstractParams]];
 
 (* Build symbolic assumptions for abstract parameters from their saved numeric values.
@@ -160,13 +164,13 @@ $abstractParamAssumptions = Flatten @ KeyValueMap[
 
 (* ---- Validate required symbols ---- *)
 If[Length[DownValues[Algorithm]] == 0,
-  Print["ERROR: 'Algorithm' not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'Algorithm' not defined in ", posArgs[[1]]]; $dbcExit[1]];
 If[Length[DownValues[energy]] == 0,
-  Print["ERROR: 'energy' not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'energy' not defined in ", posArgs[[1]]]; $dbcExit[1]];
 If[Length[DownValues[BitsToState]] == 0,
-  Print["ERROR: 'BitsToState' not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'BitsToState' not defined in ", posArgs[[1]]]; $dbcExit[1]];
 If[!ValueQ[numBeta] || !NumericQ[numBeta],
-  Print["ERROR: 'numBeta' (numeric) not defined in ", posArgs[[1]]]; Exit[1]];
+  Print["ERROR: 'numBeta' (numeric) not defined in ", posArgs[[1]]]; $dbcExit[1]];
 
 $alg         = Algorithm;
 $energy      = energy;
@@ -187,7 +191,7 @@ $checkCouplingSymmetry[] := (
           "  b=", $coupSymViolations[[1]]["b"],
           "  d2=", $coupSymViolations[[1]]["d2"],
           "  J[a,b]-J[b,a] = ", $coupSymViolations[[1]]["asymmetry"]];
-    Exit[1]];
+    $dbcExit[1]];
   Print["couplingJ symmetry: PASS"]);
 Which[
   Length[DownValues[couplingJ]] > 0,
@@ -467,7 +471,7 @@ $loopBody[bitString_List] := Catch[
         Print[];
         Print[StringRepeat["=", totalCols]];
         Print["*** DETAILED BALANCE VIOLATION DETECTED (FailFast) ***"];
-        Exit[1]]]];
+        $dbcExit[1]]]];
 
   (* ---- Numerical MCMC check ---- *)
   klStr = "-"; numResult = "-";
@@ -624,3 +628,6 @@ If[symFailCount == 0 && numFailCount == 0 && testedCount > 0,
 If[IntegerQ[maxComponents] && testedCount >= maxComponents,
   Print["(Stopped after MaxComponents=", maxComponents, " -- further components not checked.)"]];
 Print[StringRepeat["=", totalCols]];
+
+(* Shut down sub-kernels cleanly so no WolframKernel processes linger. *)
+If[$nKernels > 0, CloseKernels[]];
