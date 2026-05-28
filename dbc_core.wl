@@ -1392,14 +1392,17 @@ $dbcSZCheckOne[expr_, symParams_List, nReps_Integer] := Module[
   result]
 
 Options[CheckDetailedBalanceFast] = {
-  "SZChecker" -> False,  (* True: use Schwartz-Zippel instead of FullSimplify fallback *)
-  "SZRepeats" -> 30      (* number of random rational evaluations per expression *)
+  "SZChecker" -> False,  (* True: use Schwartz-Zippel for zero-certification; FS confirms violations *)
+  "SZRepeats" -> 30,     (* number of random rational evaluations per expression *)
+  "SZOnly"    -> False,  (* True: pure SZ — no FS at all; $dbcFS cases still get FS *)
+  "SZPure"    -> False   (* True: skip FastChecker entirely; apply SZ to all expressions directly *)
 }
 
 CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
                          extraAssumptions_List : {}, failFast_ : False,
                          OptionsPattern[]] := Module[
-  {n, pairs, assm, symParams, exprs, szCheck, szReps,
+  {n, pairs, assm, symParams, exprs, szCheck, szReps, szOnly, szPure,
+   szCheckEff, szOnlyEff,
    nonTrivIdx, ntExprs, ntPairs,
    uniqueIdxs, canonIdx, uniqueExprs, uniqueResults, idxToResult,
    results, violations, fsCache, recheckCache, nK,
@@ -1407,8 +1410,12 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
    szRaw, szFSPos, szFSOut, szFSAssoc,
    si, sj, tij, tji, ei, ej, fRes, expr, simp},
 
-  szCheck   = TrueQ[OptionValue["SZChecker"]];
-  szReps    = OptionValue["SZRepeats"];
+  szCheck    = TrueQ[OptionValue["SZChecker"]];
+  szReps     = OptionValue["SZRepeats"];
+  szOnly     = TrueQ[OptionValue["SZOnly"]];
+  szPure     = TrueQ[OptionValue["SZPure"]];
+  szCheckEff = szCheck || szPure;   (* SZPure implies SZChecker *)
+  szOnlyEff  = szOnly  || szPure;   (* SZPure implies no FS for violations *)
 
   n         = Length[allStates];
   pairs     = Flatten[Table[{i, j}, {i, 1, n}, {j, i+1, n}], 1];
@@ -1427,20 +1434,18 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
       ej   = symEnergy[sj] /. r_Real :> Rationalize[r];
       expr = tij * Exp[-\[Beta] * ei] - tji * Exp[-\[Beta] * ej];
       If[expr =!= 0,
-        fRes = $dbcCheckOneExpr[expr, assm, symParams];
+        fRes = If[szPure, $dbcFS, $dbcCheckOneExpr[expr, assm, symParams]];
         If[fRes =!= True,
-          simp = If[szCheck,
-            (* SZ path: substitute random coupling values; β stays symbolic *)
-            With[{szR = $dbcSZCheckOne[expr, symParams, szReps]},
+          simp = If[szCheckEff,
+            Module[{szR = $dbcSZCheckOne[expr, symParams, szReps]},
               Which[
-                szR === True,   0,
-                szR === $dbcFS, With[{fs = FullSimplify[PiecewiseExpand[expr],
-                                             Assumptions -> assm]},
-                                  If[fs =!= 0 &&
-                                     $dbcCheckOneExpr[fs, assm, symParams, True] === True,
-                                     0, fs]],
-                True, expr]],   (* SZ flagged non-zero: raw expr as residual *)
-            (* FS path (default) *)
+                szR === True,   0,    (* SZ certified zero *)
+                szOnlyEff && szR =!= $dbcFS,  (* SZOnly/SZPure: False → violation, skip FS *)
+                  expr,
+                True,  (* $dbcFS (or SZChecker non-True): confirm with FS *)
+                  With[{fs = FullSimplify[PiecewiseExpand[expr], Assumptions -> assm]},
+                    If[fs =!= 0 && $dbcCheckOneExpr[fs, assm, symParams, True] === True,
+                       0, fs]]]],
             With[{fs = FullSimplify[PiecewiseExpand[expr], Assumptions -> assm]},
               If[fs =!= 0 && $dbcCheckOneExpr[fs, assm, symParams, True] === True,
                  0, fs]]];
@@ -1479,12 +1484,15 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
   $dbcLastDedupUnique = Length[uniqueIdxs];
   uniqueExprs = ntExprs[[uniqueIdxs]];
 
-  (* B+C: Fast-check phase — ParallelMap over all unique expressions. *)
+  (* B+C: Fast-check phase — ParallelMap over all unique expressions.
+          SZPure bypasses FastChecker entirely: mark all as needing SZ. *)
   nK = Length[Kernels[]];
-  With[{a = assm, sp = symParams},
-    uniqueResults = If[nK > 0 && Length[uniqueExprs] > nK,
-      ParallelMap[$dbcFastWorker[#, a, sp] &, uniqueExprs],
-      Map[       $dbcFastWorker[#, a, sp] &, uniqueExprs]]];
+  If[szPure,
+    uniqueResults = Map[{$dbcFS, #, assm} &, uniqueExprs],
+    With[{a = assm, sp = symParams},
+      uniqueResults = If[nK > 0 && Length[uniqueExprs] > nK,
+        ParallelMap[$dbcFastWorker[#, a, sp] &, uniqueExprs],
+        Map[       $dbcFastWorker[#, a, sp] &, uniqueExprs]]]];
 
   idxToResult = AssociationThread[uniqueIdxs -> uniqueResults];
   results = Map[Function[k, idxToResult[canonIdx[[k]]]], Range[Length[ntExprs]]];
@@ -1497,14 +1505,19 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
   fsNeedPos   = Select[Range[Length[uniqueIdxs]], uniqueResults[[#, 1]] =!= True &];
   fsNeedIdx   = uniqueIdxs[[fsNeedPos]];
   fsNeedExprs = ntExprs[[fsNeedIdx]];
-  If[szCheck,
-    With[{sp = symParams, kr = szReps},
+  If[szCheckEff,
+    With[{sp = symParams, kr = szReps, a = assm},
       szRaw = If[nK > 0 && Length[fsNeedExprs] > nK,
         ParallelMap[$dbcSZCheckOne[#, sp, kr] &, fsNeedExprs],
         Map[       $dbcSZCheckOne[#, sp, kr] &, fsNeedExprs]];
-      szFSPos   = Select[Range @ Length[szRaw], szRaw[[#]] === $dbcFS &];
+      (* SZ=True: certified zero, skip FS.
+         SZOnly/SZPure: False→violation reported directly; $dbcFS→FS (only those).
+         Default SZChecker: any non-True→FS for confirmation. *)
+      szFSPos   = If[szOnlyEff,
+        Select[Range @ Length[szRaw], szRaw[[#]] === $dbcFS &],
+        Select[Range @ Length[szRaw], szRaw[[#]] =!= True &]];
       szFSOut   = If[Length[szFSPos] > 0,
-        With[{fe = fsNeedExprs[[szFSPos]], a = assm},
+        With[{fe = fsNeedExprs[[szFSPos]]},
           If[nK > 0 && Length[fe] > nK,
             ParallelMap[FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fe],
             Map[       FullSimplify[PiecewiseExpand[#], Assumptions -> a] &, fe]]],
@@ -1513,8 +1526,8 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
       fsResults = Table[
         Which[
           szRaw[[k]] === True,  0,
-          szRaw[[k]] === $dbcFS, szFSAssoc[k],   (* FS result for this expression *)
-          True, fsNeedExprs[[k]]],  (* SZ flagged non-zero: raw expr as residual *)
+          szOnlyEff && szRaw[[k]] =!= $dbcFS,  1,  (* SZOnly/SZPure: violation marker *)
+          True, szFSAssoc[k]],
         {k, Length[szRaw]}]],
     With[{a = assm},
       fsResults = If[nK > 0 && Length[fsNeedExprs] > nK,

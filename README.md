@@ -133,6 +133,8 @@ wolframscript -file check.wls <algorithm.wl> [options]
 | `FastChecker=1` | off | Exp-polynomial fast checker (see below) |
 | `SZChecker=1` | off | Schwartz-Zippel fallback instead of FullSimplify (requires `FastChecker=1`; see below) |
 | `SZRepeats=N` | `30` | Number of random rational evaluations per expression for SZChecker |
+| `SZOnly=1` | off | Skip FS even for suspected violations; `$dbcFS` cases still go to FS (requires `SZChecker=1`) |
+| `SZPure=1` | off | Skip FastChecker entirely; apply SZ directly to all expressions (fastest probabilistic mode; implies `SZOnly`) |
 | `PhysFidelity=1` | off | Compare T_MC to physical Glauber dynamics; adds M1 and M2 columns (see below) |
 | `Verbose=True` | `False` | Per-state BFS progress |
 
@@ -209,6 +211,10 @@ wolframscript -file check.wls examples3/vmmc_lattice.wl \
 # Schwartz-Zippel fallback: faster than FullSimplify for coupling-heavy expressions
 wolframscript -file check.wls examples3/vmmc_lattice.wl \
   NGrid=3 MaxComponents=4 FastChecker=1 SZChecker=1 Mode=Symbolic
+
+# SZPure: skip FastChecker entirely — fastest probabilistic mode, no FullSimplify
+wolframscript -file check.wls examples3/vmmc_lattice.wl \
+  NGrid=3 MaxComponents=4 SZPure=1 Mode=Symbolic
 
 # Animate on a 20×20 grid (physLen=2, cutoff just past LJ minimum)
 wolframscript -file animate.wls examples3/vmmc_continuous.wl \
@@ -361,6 +367,7 @@ The checker is a formal verifier, but it operates on a *model* of the algorithm'
 | Distance-matrix degeneracies | Two distinct geometric configurations with identical pairwise distances produce the same canonical T expression; G-invariance check sees them as equal. Only relevant for multi-particle systems with near-regular arrangements. | Test multiple components; inspect with `FailFast=1` |
 | Self-symmetric states (stabilizers) | States invariant under some g (e.g. cluster at every corner of a 2×2 square) trivially pass T(s→s') = T(g(s)→g(s')). G-invariance check cannot distinguish "invariant because G-invariant" from "invariant because stabilizer". | No false negative: stabilizer states correctly contribute zero violations |
 | SZChecker false-zero (probabilistic) | With k=30 random evaluations and random range ±p/q, p,q∈[1,50], a non-zero degree-d coupling polynomial evaluates to zero at all k points with probability ≤ (d/50)³⁰. For d≤20: ≤ 10⁻¹². | Increase `SZRepeats` for extremely high assurance; default k=30 is sufficient for all practical purposes |
+| SZPure false-zero (probabilistic) | Same as SZChecker above, applied to every expression (not just FastChecker fallbacks). The coupling polynomial structure is identical; there is no additional risk beyond SZChecker. | Same mitigation; `SZPure` also routes `$dbcFS` (transcendental) expressions to FullSimplify, so Erfc-containing algorithms are not affected |
 
 ### Known false-positive risks (spurious failures)
 
@@ -378,6 +385,20 @@ The checker is a formal verifier, but it operates on a *model* of the algorithm'
 After `PiecewiseExpand`, DB expressions reduce to sums of `c·exp(−β·L)` terms. DB holds iff all coefficient groups sum to zero — verified by `Expand[...] === 0` (microseconds). Falls back to `FullSimplify` (or SZChecker if enabled) for inconclusive cases. Works directly for Metropolis acceptance; falls back gracefully for Barker/heat-bath.
 
 All checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (`$dbcDedup`; collapses G-orbit pairs when canonical oracle is active) → threshold-based `ParallelMap`.
+
+### SZPure checker (`SZPure=1`)
+
+The fastest probabilistic mode. Bypasses FastChecker's Piecewise case enumeration entirely and applies Schwartz-Zippel directly to every deduplicated DB expression:
+
+1. For each unique expression, substitute `k` random rationals for all coupling parameters; β remains symbolic.
+2. `$dbcIsExpZero` checks whether every Exp-basis coefficient vanishes exactly (microseconds, pure rational arithmetic).
+3. All `k` evaluations confirm zero → PASS. Any non-zero result → violation. If the expression structure is unexpected after substitution (`$dbcFS`) → fall back to FullSimplify for that expression only.
+
+`SZPure=1` implies `FastChecker=1` and `SZOnly=1` (automatically enabled). Use `SZRepeats=N` to control `k` (default 30).
+
+**When to use.** SZPure is fastest for systems with many unique expressions per component where FastChecker's Piecewise enumeration is the bottleneck. For coupling-polynomial algorithms (VMMC with pairwise LJ/Yukawa), SZPure certifies zero in microseconds per expression. For algorithms with Gaussian/Erfc proposals, the transcendental coefficient terms trigger `$dbcFS` and fall back to FullSimplify automatically — SZPure still works correctly but does not accelerate those expressions.
+
+**False-negative risk.** The probabilistic false-zero rate is ≤ (d/50)^k per expression (d = coupling polynomial degree). At d≤20, k=30: < 10⁻³⁸. Increase `SZRepeats` for mission-critical audits.
 
 ### Schwartz-Zippel checker (`FastChecker=1 SZChecker=1`)
 

@@ -81,6 +81,8 @@ If[Length[posArgs] < 1,
   Print["  FastChecker=1        Use Exp-polynomial fast path (recommended)"];
   Print["  SZChecker=1          Use Schwartz-Zippel fallback instead of FullSimplify (needs FastChecker=1)"];
   Print["  SZRepeats=N          Random evaluations per expression for SZChecker (default 30)"];
+  Print["  SZOnly=1             Pure SZ: skip FS even for violations (needs SZChecker=1; fastest, probabilistic)"];
+  Print["  SZPure=1             Skip FastChecker entirely; apply SZ directly to all expressions (implies SZOnly)"];
   Print["  FailFast=1           Stop on first violation; print T, E, residual"];
   $dbcExit[1]];
 
@@ -93,6 +95,8 @@ verbose         = False;
 fastChecker     = False;   (* FastChecker=1: use Exp-polynomial fast path *)
 szChecker       = False;   (* SZChecker=1: Schwartz-Zippel fallback (needs FastChecker=1) *)
 szRepeats       = 30;      (* SZRepeats=N: random evaluations per expression (default 30) *)
+szOnly          = False;   (* SZOnly=1: pure SZ, no FS (needs SZChecker=1; $dbcFS→FS only) *)
+szPure          = False;   (* SZPure=1: skip FastChecker entirely; SZ on all exprs (implies SZOnly) *)
 failFast        = False;   (* FailFast=1: stop+print debug info on first violation *)
 seedBitStrings  = None;    (* SeedBitStrings=X,Y: test specific bit strings *)
 physFidelity    = False;   (* PhysFidelity=1: compare T_MC to T_phys (Glauber) *)
@@ -109,11 +113,20 @@ Do[
   If[StringMatchQ[opt, "FastChecker="    ~~ __], fastChecker    = (StringDrop[opt, 12] =!= "0")];
   If[StringMatchQ[opt, "SZChecker="     ~~ __], szChecker      = (StringDrop[opt, 10] =!= "0")];
   If[StringMatchQ[opt, "SZRepeats="     ~~ __], szRepeats      = ToExpression[StringDrop[opt, 10]]];
+  If[StringMatchQ[opt, "SZOnly="        ~~ __], szOnly         = (StringDrop[opt,  7] =!= "0")];
+  If[StringMatchQ[opt, "SZPure="        ~~ __], szPure         = (StringDrop[opt,  7] =!= "0")];
   If[StringMatchQ[opt, "FailFast="       ~~ __], failFast       = (StringDrop[opt,  9] =!= "0")];
   If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")];
   If[StringMatchQ[opt, "MaxComponents="  ~~ __], maxComponents  = ToExpression[StringDrop[opt, 14]]];
   If[StringMatchQ[opt, "NGrid="          ~~ __], nGrid          = ToExpression[StringDrop[opt,  6]]],
   {opt, kvArgs}];
+
+(* ---- Validate option combinations ---- *)
+If[szPure && !fastChecker,
+  Print["Note: SZPure=1 requires FastChecker=1 — enabling automatically."];
+  fastChecker = True];
+If[szPure && !szChecker,
+  szChecker = True];  (* SZPure implies SZChecker internally; keep consistent *)
 
 (* ---- Validate MaxBitString ---- *)
 If[!StringMatchQ[maxBitString, ("0" | "1")..],
@@ -345,9 +358,15 @@ If[mode =!= "Symbolic", Print["NSteps:        ", nSteps]];
 Print["MaxBitDepth:   ", maxBitDepth];
 If[fastChecker && mode =!= "Numerical",
   Print["SymChecker:    FastChecker (Exp-polynomial; " <>
-    If[szChecker,
-      "Schwartz-Zippel fallback; k=" <> ToString[szRepeats] <> " evals)",
-      "FullSimplify fallback)"]],
+    Which[
+      szPure,
+        "SZPure; k=" <> ToString[szRepeats] <> " evals; no FastChecker; no FS)",
+      szChecker && szOnly,
+        "SZ-only fallback; k=" <> ToString[szRepeats] <> " evals; no FS)",
+      szChecker,
+        "Schwartz-Zippel fallback; k=" <> ToString[szRepeats] <> " evals)",
+      True,
+        "FullSimplify fallback)"]],
   If[mode =!= "Numerical",
     Print["SymChecker:    FullSimplify (standard)"]]];
 If[failFast && mode =!= "Numerical",
@@ -499,7 +518,8 @@ $loopBody[bitString_List] := Catch[
   If[mode =!= "Numerical",
     With[{viol = If[fastChecker,
                   CheckDetailedBalanceFast[matrix, allStates, $energy, compSymAssumptions, failFast,
-                                           "SZChecker" -> szChecker, "SZRepeats" -> szRepeats],
+                                           "SZChecker" -> szChecker, "SZRepeats" -> szRepeats,
+                                           "SZOnly" -> szOnly, "SZPure" -> szPure],
                   CheckDetailedBalance[    matrix, allStates, $energy, compSymAssumptions, failFast]]},
       symResult = If[viol === {}, "PASS", "FAIL"];
       failStr   = If[viol === {}, "0",    ToString[Length[viol]]];
