@@ -5,12 +5,11 @@
 \usepackage{microtype}
 \usepackage{parskip}
 \geometry{margin=2.5cm}
-
-\setlength{\parskip}{6pt}
+\setlength{\parskip}{5pt}
 \setlength{\parindent}{0pt}
 
-\title{Symmetry Reduction in the Detailed Balance Checker\\[0.4em]
-\large The Speedup, Why It Works, and When It Can Go Wrong}
+\title{Symmetry Reduction in the Detailed Balance Checker:\\
+\large Feasibility, Expected Speedup, and Correctness Conditions}
 \author{}
 \date{}
 
@@ -18,514 +17,228 @@
 \maketitle
 
 % ============================================================
-\section{The problem: why checking is slow}
+\section{What the method proposes}
 % ============================================================
 
-The detailed balance checker works in two phases.  First it explores, by
-breadth-first search (BFS), all particle configurations (``states'') that the
-algorithm can reach from a given starting configuration.  It then checks
-whether the algorithm satisfies \emph{detailed balance} (DB) for every pair of
-states it found.
+The detailed balance (DB) checker must verify
+$T(s_i\!\to\!s_j)\,\pi(s_i) = T(s_j\!\to\!s_i)\,\pi(s_j)$
+for every pair of states $(s_i,s_j)$ found by BFS.
+For a component of $N$ states this is $N(N{-}1)/2$ pairs.
+At \texttt{NGrid\,=\,3} ($N=504$) that is 126,756 pairs; at
+\texttt{NGrid\,=\,6} ($N\approx100{,}000$) it is $\sim5\times10^9$,
+which is infeasible.
 
-Detailed balance for a pair of states $(s_i, s_j)$ is the condition:
-\[
-  T(s_i \to s_j)\;\pi(s_i) \;=\; T(s_j \to s_i)\;\pi(s_j).
-\]
-Here $T(s_i \to s_j)$ is the probability of the algorithm moving from state
-$s_i$ to state $s_j$ in one step, and $\pi(s) \propto e^{-\beta E(s)}$ is the
-Boltzmann weight — the fraction of time a \emph{correct} algorithm would spend
-in state $s$ at equilibrium.  Detailed balance is the pair-by-pair condition
-that guarantees the algorithm samples from the physically correct distribution.
-If it fails for even one pair, the algorithm is wrong.
-
-For a connected component with $N$ states there are $N(N-1)/2$ pairs to check.
-For \texttt{vmmc\_lattice.wl} at \texttt{NGrid}$\,=3$, the BFS finds $N = 504$
-states, giving $504\times503/2 = 126{,}756$ pairs.  Most pairs have $T = 0$ in
-both directions (the states cannot reach each other in one step), but the
-symbolic computation for the ${\sim}3{,}000$ non-trivial pairs still takes
-about 3 minutes on a 4-core machine.  For \texttt{NGrid}$\,=6$
-($N\approx100{,}000$), the pair count reaches ${\sim}5\times10^9$ --- entirely
-infeasible without a reduction.
-
-The symmetry reduction proposed here cuts the number of pairs that need checking
-by a factor equal to the size of the algorithm's symmetry group.  This document
-explains the idea in plain terms, gives the quantitative impact, and then
-works through every condition that must hold for the reduction to be
-\emph{correct} --- and what happens when each one fails.
-
-% ============================================================
-\section{The core idea: symmetry creates families of equivalent pairs}
-% ============================================================
-
-\subsection*{What is a symmetry of the algorithm?}
-
-Consider a $3\times3$ square lattice with periodic boundary conditions
-(think of the edges as wrapping around like a torus, so there is no
-``edge'' or special position).  A \emph{translation} by $(a,b)$ shifts
-every particle one step: the particle at site $(r,c)$ moves to
-$(r+a,\,c+b)\,\bmod 3$.  There are nine translations in total (three
-choices each for $a$ and $b$).
-
-We say the algorithm is \emph{translation-invariant} if shifting the
-entire configuration by $(a,b)$ leaves all transition probabilities
-unchanged.  Formally, writing $g\cdot s$ for the state obtained by
-applying translation $g$ to every particle in state $s$:
-\begin{equation}
-  T(g\cdot s \;\to\; g\cdot s') \;=\; T(s \to s')
-  \quad\text{for every translation }g
-  \text{ and every pair of states }s,s'.
-  \label{eq:ginv}
-\end{equation}
-In plain language: the algorithm cannot tell which corner of the lattice
-it is in.  This holds whenever (a) the seed particle is chosen uniformly
-from all occupied sites (not favouring any particular position), and (b)
-the energy depends only on the distances between particles, not on their
-absolute positions.  Both conditions hold for \texttt{vmmc\_lattice.wl}.
-
-The Boltzmann weight satisfies the same property: if two configurations
-are identical up to a translation, they have the same energy and
-therefore the same Boltzmann weight: $\pi(g\cdot s) = \pi(s)$.
-
-\subsection*{Why this means pairs come in families}
-
-Each pair of states $\{s,s'\}$ has nine \emph{translated copies}:
-$\{g\cdot s,\;g\cdot s'\}$ for each of the nine translations $g$.
-Because the algorithm is translation-invariant, every one of these nine
-pairs has \emph{exactly the same transition probabilities} as the
-original:
-\[
-  T(g\cdot s \to g\cdot s') = T(s \to s'),
-  \qquad
-  T(g\cdot s' \to g\cdot s) = T(s' \to s).
-\]
-So the detailed-balance expression is the same for all nine pairs.  If
-it equals zero for one of them, it equals zero for all nine.
-
-\subsection*{The key argument: checking one pair certifies nine}
-
-Suppose detailed balance holds for the original pair $(s,s')$:
-\[
-  T(s\to s')\,\pi(s) = T(s'\to s)\,\pi(s').
-\]
-Now consider any translated copy $(g\cdot s,\;g\cdot s')$.  We check
-each side of the detailed-balance condition:
+The proposed speedup exploits the fact that for a translation-invariant
+algorithm on a periodic lattice, all nine translated copies of a
+configuration pair produce \emph{identical physics}.  If the pair
+$(s,s')$ satisfies DB, then every translated copy $(g{\cdot}s,\,g{\cdot}s')$
+automatically satisfies DB too, by a three-line argument:
 \begin{align*}
-  T(g\cdot s \to g\cdot s')\;\pi(g\cdot s)
-  &= T(s \to s')\;\pi(s)   &&\text{[translation-invariance of }T\text{ and }\pi\text{]}\\
-  &= T(s' \to s)\;\pi(s')  &&\text{[detailed balance for the original pair]}\\
-  &= T(g\cdot s' \to g\cdot s)\;\pi(g\cdot s').&&\text{[translation-invariance again]}
+  T(g{\cdot}s \to g{\cdot}s')\,\pi(g{\cdot}s)
+  &= T(s\to s')\,\pi(s)
+   = T(s'\to s)\,\pi(s')
+   = T(g{\cdot}s'\to g{\cdot}s)\,\pi(g{\cdot}s').
 \end{align*}
-The first and last expressions are exactly the two sides of detailed
-balance for the translated pair.  They are equal, so detailed balance
-holds for the translated pair too --- \emph{without us having to check
-it}.
+The outer equalities use the symmetry of $T$ and $\pi$; the middle uses
+DB for the original pair.  The reverse direction holds identically:
+a violation for $(s,s')$ implies a violation for every translated copy.
+Therefore it suffices to check \emph{one pair per family of equivalent
+pairs}.
 
-The reverse works identically: if detailed balance \emph{fails} for the
-original pair, it fails for every translated copy as well.  So checking
-one pair from each family of nine is both necessary and sufficient.
+For a $3\times3$ lattice with 9 translations ($|G|=9$), the 126,756
+pairs reduce to $126{,}756/9 = 14{,}084$.  Adding the 8 rotations and
+reflections of the square (D4, giving $|G|=72$) reduces this further to
+${\approx}1{,}760$ pairs.
 
-\subsection*{Rotational and reflective symmetry: D4}
+% ============================================================
+\section{Where the runtime actually comes from}
+% ============================================================
 
-The $3\times3$ square lattice has additional symmetry: rotating all
-particle positions by $90^\circ$, $180^\circ$, or $270^\circ$, or
-reflecting across the horizontal, vertical, or either diagonal axis,
-leaves the physics unchanged.  There are 8 such operations (4 rotations
-including the identity, and 4 reflections), together called the D4
-symmetry group of the square.
+Understanding whether the speedup is real requires understanding the
+current bottleneck precisely.
 
-Combined with the 9 translations, there are $8\times9 = 72$ operations
-in total.  If the algorithm is invariant under all 72 of these, each
-family grows to 72 equivalent pairs, and the number of pairs to check
-shrinks by a factor of 72.
+The checker pipeline is: (1) BFS to find all $N$ states; (2) for each
+pair with non-zero $T$, build the symbolic DB expression; (3) deduplicate
+expressions by hash and run \texttt{FastChecker} on each unique one;
+(4) run \texttt{FullSimplify} on expressions \texttt{FastChecker} could
+not resolve; (5) scan for violations.
 
-For \texttt{vmmc\_lattice.wl} this D4 invariance does hold: the
-displacement list $\{(\pm1,0),(0,\pm1),(\pm1,\pm1)\}$ is unchanged by
-any rotation or reflection of the square, and the energy (depending only
-on inter-particle distances, which rotations and reflections preserve) is
-also invariant.
+Step (3) uses Mathematica's \texttt{Hash[]} on the symbolic expression
+object.  This matches \emph{syntactically identical} expressions — same
+atoms in the same positions — not merely mathematically equivalent ones.
+G-equivalent pairs (e.g.\ the same cluster geometry translated to a
+different lattice site) produce expressions that reference different site
+indices, different neighbor lists, and different random-variable
+assignments; they come out in different symbolic forms even though their
+mathematical content is the same.  They therefore hash differently, and
+the deduplication step does \emph{not} group them.
+
+Consequence: the ${\sim}3{,}000$ unique expressions reported for
+\texttt{NGrid\,=\,3} are genuinely distinct after all caching.  The
+orbit reduction would reduce this count by the full factor of $|G|$, not
+a fraction of it.
+
+\textbf{Step (4), the FullSimplify calls, is the runtime bottleneck.}
+For \texttt{vmmc\_lattice.wl} (polynomial conditions, no Erfc),
+\texttt{FastChecker} resolves most expressions quickly, but a
+fraction --- roughly 10\,\% of the unique expressions, or ${\sim}300$ at
+\texttt{NGrid\,=\,3} --- require \texttt{FullSimplify}, each taking
+${\sim}0.5$\,s.  At 300 calls $\times$ 0.5\,s, spread across 4 kernels,
+total time is $\approx$\,3 minutes, consistent with observed runtimes.
 
 % ============================================================
 \section{Quantitative impact}
 % ============================================================
 
+All rows below refer to the 504-state connected component found at
+\texttt{NGrid\,=\,3}.  The FullSimplify estimate assumes ${\sim}10\%$ of
+unique expressions require it and ${\sim}0.5$\,s each.
+
 \begin{center}
 \renewcommand{\arraystretch}{1.25}
 \begin{tabular}{lrrr}
 \toprule
-Quantity & No symmetry & Translations ($|G|=9$) & D4+trans.\ ($|G|=72$) \\
+ & No symmetry & Translations ($|G|{=}9$) & D4+trans.\ ($|G|{=}72$) \\
 \midrule
-States in component & 504 & 504 & 504 \\
-Pairs to check      & 126,756 & 14,084 & ${\approx}1{,}760$ \\
-Unique sym.\ exprs  & ${\sim}3{,}000$ & ${\sim}333$ & ${\sim}42$ \\
-Estimated runtime   & 3 min  & ${\sim}20$\,s & ${\sim}2$--$3$\,s \\
+Pairs to check      & 126,756  & 14,084   & $\approx$1,760  \\
+Unique sym.\ exprs  & $\sim$3,000 & $\sim$333 & $\sim$42    \\
+FullSimplify calls  & $\sim$300   & $\sim$33  & $\sim$4     \\
+Estimated runtime   & 3\,min   & $\sim$20\,s & $\sim$2\,s  \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-For \texttt{NGrid}$\,=6$ ($N\approx100{,}000$ states), the pair count
-without symmetry is ${\sim}5\times10^9$ --- computationally infeasible.
-With translations ($|G|=36$) this reduces to ${\sim}1.4\times10^8$, and
-with D4 + translations ($|G|=288$) to ${\sim}1.7\times10^7$.  At this
-scale the symmetry reduction is not an optimisation; it is the difference
-between a feasible and an infeasible computation.
+\textbf{These estimates are approximate.}  The FullSimplify fraction
+depends on the specific expressions generated, which varies with NGrid
+and the seed configuration.  The table should be read as order-of-magnitude
+guidance, not a performance guarantee.
+
+For \texttt{NGrid\,=\,6} the reduction from $5\times10^9$ to
+${\approx}1.7\times10^7$ pairs with $|G|{=}288$ is the difference between
+infeasible and potentially tractable.  The absolute runtime at that scale
+is harder to predict without profiling, since it depends on the fraction
+of expressions needing FullSimplify, which may differ from the
+NGrid\,=\,3 case.
 
 % ============================================================
-\section{Concern: what about pairs of states that are related by symmetry?}
+\section{Conditions for correctness, and their risks}
 % ============================================================
 
-A natural worry: two states can sometimes be \emph{related by a
-symmetry} --- for example, a particle cluster translating by one site
-produces a state that is a translated copy of the original.  These two
-states are in the same translation family.  The transition between them
-is a pair whose two members are in the same family.  Do we not need to
-check such pairs independently?
+The reduction is logically valid but depends on conditions that must be
+verified, not assumed.  A failure in any one of them can cause the
+checker to report PASS on a broken algorithm.
 
-The answer is no --- these pairs are already counted in the family
-structure and are not a special exception.
+\textbf{1. The algorithm must actually be symmetric (critical).}
+The entire reduction assumes $T(g{\cdot}s\to g{\cdot}s') = T(s\to s')$.
+If this fails, families will contain pairs with different DB status, and
+the checker will certify a violating pair based on a non-violating
+representative.  \texttt{vmmc\_biased.wl} demonstrates this exactly: its
+rightward bias means a pair involving a rightward cluster move violates
+DB, but the $90^\circ$-rotated copy (an upward move, which is unbiased)
+satisfies DB.  With D4 symmetry assumed, the upward pair becomes the
+representative, and the checker incorrectly returns PASS.  Section 4
+below describes how to verify symmetry from the source code.
 
-Let $s$ be a state and $h\cdot s$ be a translated copy of it (for some
-non-trivial translation $h$).  The pair $\{s,\;h\cdot s\}$ is a
-perfectly ordinary unordered pair, with its own family of nine translated
-copies.  Detailed balance for this pair reads (using $\pi(s)=\pi(h\cdot
-s)$ since the states have the same energy):
+\textbf{2. The connected component must be closed under the symmetry.}
+Every symmetry image $g{\cdot}s$ of every state $s$ in the component
+must also be in the same component.  If not, the effective symmetry group
+for that component is smaller than $G$, and the claimed speedup factor is
+wrong.  For \texttt{NGrid\,=\,3} with $|G|{=}9$, the component size
+$504 = 56\times9$ is consistent with this, but it should be confirmed
+programmatically, not inferred from arithmetic.
+
+\textbf{3. BFS must not be short-circuited using canonical states.}
+A tempting shortcut is to run BFS only from one representative state per
+symmetry family and check only pairs of representatives.  This is wrong.
+The canonical representative of $s$ is $g_0{\cdot}s$ and the canonical
+representative of $s'$ is $g_1{\cdot}s'$ for (generically) different
+$g_0\neq g_1$.  The transition $T(g_0{\cdot}s \to g_1{\cdot}s')$ is not
+equal to $T(s\to s')$ in general.  BFS must run on all $N$ states, and
+orbit reduction only controls which pairs are sent to the DB checker.
+
+\textbf{4. Canonical representatives must be computed per pair.}
+Some configurations are self-symmetric (a non-trivial $g$ fixes the
+state $g{\cdot}s=s$), making their family smaller than $|G|$.  The
+implementation must compute the canonical representative explicitly for
+every pair, not assume all families have size $|G|$ and skip by that
+factor.
+
+\textbf{5. Rotation formulas must be correct for the lattice size.}
+The $90^\circ$ rotation $(r,c)\mapsto(c,\,L{-}1{-}r)$ maps lattice sites
+to lattice sites for any $L$, but an off-by-one error produces a mapping
+that is not a true bijection.  This bug is silent: the code runs without
+error but computes wrong orbit representatives, potentially skipping pairs
+that were never actually certified.
+
+% ============================================================
+\section{Verifying position-independence from source code}
+% ============================================================
+
+The symmetry reduction can only be trusted if the algorithm file is
+genuinely position-independent.  For \texttt{vmmc\_lattice.wl}-style
+algorithms, this can be checked by reading three specific parts of the
+source code.
+
+\textbf{Seed selection.}  Look for the line that chooses the seed
+particle.  It should be \texttt{RandomChoice[occupied]} where
+\texttt{occupied} is the list of all non-empty sites, with no weighting
+by position.  Any position-dependent weighting (e.g.\ preferring sites
+near the lattice centre) would break translation invariance.
+
+\textbf{Displacement selection.}  Look for the line that chooses the
+proposed move direction.  For translation invariance it must be
+\texttt{RandomChoice[\$displacements]} where \texttt{\$displacements}
+is a fixed list that does not depend on the current state or on which
+site was seeded.  For D4 invariance additionally, the list must be closed
+under rotation and reflection: the uniform box
+$\{(\pm1,0),(0,\pm1),(\pm1,\pm1)\}$ satisfies this; any list that
+over-represents one direction (as in \texttt{vmmc\_biased.wl}) does not.
+
+\textbf{Energy computation.}  Find the function that computes pair
+interaction energy.  It should call \texttt{couplingJ[a,\,b,\,d2]} where
+\texttt{d2} is the squared \emph{periodic} distance between the two
+sites:
 \[
-  T(s \to h\cdot s) \;=\; T(h\cdot s \to s).
+  d^2 = \min(\Delta r,\;L{-}\Delta r)^2 + \min(\Delta c,\;L{-}\Delta c)^2,
 \]
-This is a \emph{proposal-symmetry} condition: the probability of the
-cluster moving by displacement $h$ must equal the probability of the
-reverse displacement $h^{-1}$.  For \texttt{vmmc\_lattice.wl} the
-displacement list always contains $\mathbf{d}$ and $-\mathbf{d}$ as a
-pair, so this holds automatically and these pairs need no explicit
-checking.
+with $\Delta r = |r_1-r_2|$ and $\Delta c = |c_1-c_2|$.  The distance
+formula must use the minimum-image convention (the \texttt{min} terms)
+to be periodic-boundary-correct.  If the energy instead uses raw
+coordinate differences $\Delta r = r_1-r_2$ (not wrapped), it will not
+be translation-invariant at the lattice boundary.  For D4 invariance,
+note that $90^\circ$ rotation swaps $\Delta r$ and $\Delta c$ and
+negates one; since both appear squared and summed, $d^2$ is unchanged.
 
-Even without that argument: the number of ``within-family'' pairs like
-this grows only linearly with the number of states ($O(N)$), whereas
-``between-family'' pairs grow quadratically ($O(N^2)$).  For large $N$
-the within-family contribution is negligible, and the dominant $O(N^2)$
-cost still shrinks by the full symmetry factor.
-
-% ============================================================
-\section{Conditions for correctness: what can go wrong}
-% ============================================================
-
-The argument above is logically sound, but it rests on several
-conditions that must be \emph{verified}, not assumed.  This section
-lists each condition, explains why it might fail, and assesses the
-consequence of getting it wrong.  A failure in any one of these
-conditions can turn a correct FAIL into an incorrect PASS --- the most
-dangerous kind of error for a checker.
-
-% -------------------------------------------------------
-\subsection{Condition 1: The algorithm must actually be symmetric}
-% -------------------------------------------------------
-
-The entire reduction rests on equation~\eqref{eq:ginv}: that the
-algorithm's transition probabilities are genuinely unchanged when the
-whole configuration is translated (or rotated or reflected).  If this
-fails for even one pair of states and one symmetry operation, the
-reduction can certify a violating pair as passing.
-
-\paragraph{A concrete failure: the biased algorithm.}
-The file \texttt{vmmc\_biased.wl} provides an exact demonstration.
-That algorithm proposes rightward displacements twice as often as
-leftward ones, breaking proposal symmetry.  Now consider a pair of
-states $(s,s')$ where $s'$ is $s$ with a particle cluster shifted one
-site to the right.  This pair violates detailed balance because the
-forward rate (rightward, doubled probability) differs from the reverse
-rate (leftward, normal probability).
-
-A D4 symmetry reduction would group this pair into a family of 72
-equivalent pairs.  Among those 72 is a pair related by a $90^\circ$
-rotation, where the cluster moves upward instead of rightward.  Upward
-and downward moves are \emph{not} biased, so that pair satisfies detailed
-balance perfectly.  If the checker happens to pick the upward pair as
-the family representative, it evaluates it, finds no violation, and
-certifies the whole family as passing --- including the rightward pair
-that actually fails.  The checker reports PASS on a broken algorithm.
-
-\paragraph{Why verification is harder than it looks.}
-The natural verification strategy is: run the BFS from state $s$, run
-it again from the rotated state $g\cdot s$, and check whether the two
-sets of transition probabilities agree (after rotating the second set
-back by $g^{-1}$).
-
-The difficulty is that the two BFS runs produce symbolic expressions in
-different forms.  The BFS threads random-choice variables (labelled
-$r_1, r_2, \ldots$) through the algorithm in the order it encounters
-them, and two different starting states encounter the same decisions in
-different orders.  The resulting symbolic expressions can be
-mathematically equal but written completely differently.  A
-character-by-character string comparison would declare them unequal when
-they are in fact equal --- a false alarm.  A proper check requires
-simplifying the difference to zero using a symbolic algebra system,
-which can be as expensive as the DB check itself.
-
-An alternative is to verify by reading the algorithm's source code:
-confirm that the seed-particle selection, displacement probabilities, and
-link-weight computation each depend only on inter-particle geometry (not
-absolute positions), so that rotating or translating the whole
-configuration provably leaves everything unchanged.  This is more
-reliable but requires human review of every algorithm before applying
-the reduction.
-
-% -------------------------------------------------------
-\subsection{Condition 2: The connected component must be closed
-            under the symmetry}
-% -------------------------------------------------------
-
-The BFS finds a connected component: a set of states all reachable from
-one another via the algorithm.  For the family reduction to work within
-one component, every symmetry image of every state in that component must
-also be in the \emph{same} component.
-
-If this fails --- if translating state $s$ (which is in component $C$)
-gives a state $g\cdot s$ that is in a \emph{different} component $C'$
---- then the family of the pair $\{s,s'\}$ (both in $C$) contains pairs
-$\{g\cdot s,\;g\cdot s'\}$ that span $C$ and $C'$.  The BFS for
-component $C$ never found $g\cdot s$, so those cross-component pairs
-were never examined.  An implementation that incorrectly counts
-cross-component images as ``certified'' would be skipping checks it has
-not actually performed.
-
-In practice, the safe implementation must confirm: for each state $s$
-found in a component, every symmetry image $g\cdot s$ is also in the
-same component.  If some images fall outside, the effective symmetry
-group for that component is only the \emph{sub-collection} of operations
-that do map the component to itself, and the speedup factor is
-accordingly smaller.
-
-For \texttt{vmmc\_lattice.wl} at \texttt{NGrid}$\,=3$, the 504-state
-component has size $504 = 56\times9$, consistent with all 9 translations
-acting within it --- but this must be confirmed explicitly, not assumed
-from the arithmetic.
-
-% -------------------------------------------------------
-\subsection{Condition 3: BFS must run on all states, not just
-            ``representative'' states}
-% -------------------------------------------------------
-
-A tempting shortcut is: pick one representative state per symmetry
-family, run BFS only from representative states, and then check only
-pairs of representatives.  This is \textbf{wrong} and produces incorrect
-transition probabilities.
-
-Here is the problem.  Say state $s$ is mapped to its representative by
-applying symmetry operation $g_0$: representative$(s) = g_0\cdot s$.
-State $s'$ is mapped to its representative by a \emph{different}
-operation $g_1$: representative$(s') = g_1\cdot s'$.  If we run BFS
-only from representatives, the transition we compute is
-$T(g_0\cdot s \to g_1\cdot s')$ --- the probability of moving from the
-representative of $s$ to the representative of $s'$ in a single step.
-
-But by the symmetry property, $T(g\cdot s \to g\cdot s') = T(s\to s')$
-only when the \emph{same} operation $g$ is applied to both states.  With
-$g_0\neq g_1$, the quantity $T(g_0\cdot s \to g_1\cdot s')$ is a
-transition between two states that are not symmetry-images of each other
-in the required sense, and is generically \emph{not} equal to
-$T(s\to s')$.  The BFS-on-representatives shortcut computes the wrong
-numbers.
-
-The correct implementation always runs the full BFS on all $N$ states,
-computing the actual transition probabilities between actual states.  The
-symmetry reduction only controls \emph{which pairs are subsequently sent
-to the DB checker} --- it does not change how transition probabilities
-are computed.
-
-% -------------------------------------------------------
-\subsection{Condition 4: Do not assume all families have the same size}
-% -------------------------------------------------------
-
-The speedup formula $N(N-1)/(2|G|)$ assumes every family of pairs has
-exactly $|G|$ members.  This fails when some symmetry operation maps a
-pair to itself.
-
-\paragraph{States that look the same after a symmetry.}
-If a symmetry operation $g$ (other than the identity) maps a state $s$
-to itself --- $g\cdot s = s$ --- then the family of $s$ has fewer than
-$|G|$ members.  As a concrete example: on a fully-occupied $3\times3$
-lattice where every site holds a particle of the same type, any
-translation maps the occupancy to itself, so all 9 translations fix the
-state.
-
-If an implementation \emph{assumes} every family has exactly $|G|$
-members and after checking one representative automatically skips the
-next $|G|-1$ pairs, it will sometimes skip pairs from \emph{different},
-smaller families --- potentially missing a violation.  The safe approach
-is to compute the canonical representative for every pair explicitly, and
-only check a pair if it \emph{is} its own canonical representative,
-without ever assuming how large the family is.
-
-\paragraph{Symmetries that swap the two states in a pair.}
-If $g\cdot s = s'$ and $g\cdot s' = s$ (a symmetry swaps the two states
-in the pair), then by symmetry invariance $T(s\to s') = T(s'\to s)$,
-and since $\pi(s)=\pi(s')$ (same energy), detailed balance holds
-automatically.  These pairs can be identified and skipped entirely with
-no symbolic computation needed.
-
-% -------------------------------------------------------
-\subsection{Condition 5: Rotations must be correctly implemented for
-            the lattice size}
-% -------------------------------------------------------
-
-For a $90^\circ$ rotation on an $L\times L$ lattice, the rotation must
-map every lattice site to another lattice site --- a bijection (a
-one-to-one mapping with no overlaps or gaps).  The standard formula
-rotates site $(r,c)$ to $(c,\;L-1-r)$.  For $L=3$: $(0,0)\to(0,2)$,
-$(1,0)\to(0,1)$, $(2,0)\to(0,0)$, and so on --- all 9 sites map to the
-9 sites with no repeats.  For $L=4$: $(0,0)\to(0,3)$, $(3,0)\to(0,0)$,
-etc.\ --- again a valid bijection.
-
-An off-by-one error in this formula (for example, using $L$ instead of
-$L-1$ in the formula) would produce a mapping where two different sites
-map to the same image, or where some images fall outside the grid.  The
-result would be a rotation that is not actually a symmetry of the
-lattice, so the ``family'' structure would be wrong.  Pairs that the
-implementation considers equivalent would not be genuinely equivalent,
-and pairs it skips might have been in different families that were never
-checked.  This kind of bug is silent: the code produces a result without
-error, but that result is wrong.
-
-% -------------------------------------------------------
-\subsection{Condition 6: The speedup partially overlaps with the
-            existing symbolic cache}
-% -------------------------------------------------------
-
-The current checker already deduplicates symbolic expressions: if two
-pairs $(s_i, s_j)$ and $(s_k, s_l)$ produce \emph{identical} symbolic
-expressions for $T(s_i\to s_j)\pi(s_i) - T(s_j\to s_i)\pi(s_j)$, the
-FullSimplify call is done only once and the result reused.  For a
-genuinely symmetric algorithm, all 9 pairs in the same translation family
-produce the same symbolic expression (because the coupling-constant atoms
-depend only on particle type and distance, both of which are preserved by
-translations).  The existing cache therefore already achieves the
-${\sim}9\times$ reduction in the number of FullSimplify calls.
-
-This means the symmetry orbit reduction, as proposed, \emph{does not}
-speed up the unique-expression evaluation step --- that is already
-cached.  Its real gain is in reducing the number of \emph{pairs that are
-constructed and pre-processed} before reaching the symbolic evaluator.
-For \texttt{NGrid}$\,=3$ ($N=504$), constructing 126,756 pairs and
-filtering them down to ${\sim}3{,}000$ non-trivial ones is fast; the
-bottleneck is FullSimplify, and the cache already helps there.  For
-\texttt{NGrid}$\,=6$ ($N\approx100{,}000$), constructing $5\times10^9$
-pairs is itself the bottleneck, and the symmetry reduction from
-$5\times10^9$ to $1.7\times10^7$ is what makes the computation feasible
-at all.  The speedup therefore matters most at the scales where it is
-most needed.
-
-% -------------------------------------------------------
-\subsection{Condition 7: ``It works on my test cases'' is not
-            sufficient validation}
-% -------------------------------------------------------
-
-For the ``$90^\circ$ clockwise rotation only'' algorithm described
-separately, the D4 symmetry checker happens to produce the correct
-FAIL result \emph{even though the algorithm is not D4-invariant}.  The
-reason is that reflecting a ``clockwise-violated'' pair gives a
-``counter-clockwise-violated'' pair, which is also a violation, just
-with the two sides swapped.  Every member of every D4 family is a
-violating pair, so whichever representative the checker picks, it finds
-a violation.
-
-This \emph{accidental correctness} is dangerous as a validation
-strategy: if you test the symmetry checker only on that broken algorithm
-and observe correct FAIL results, you might conclude the G-invariance
-verification is working when it is not.  A proper test requires an
-algorithm like \texttt{vmmc\_biased.wl}, which is broken in a way that
-creates \emph{non-violating} members in the same family as violating
-ones.  Without such targeted tests, a buggy or absent G-invariance
-verification could go undetected.
-
-The general principle: use D4 symmetry only when D4 invariance has been
-verified for the specific algorithm.  An algorithm that is
-translation-invariant but not D4-invariant should use only the
-translation group for the reduction.  Using a symmetry group \emph{larger}
-than the algorithm's actual symmetry is not a harmless over-reach; it
-actively introduces false negatives.
+These three checks can be performed by reading fewer than 20 lines of
+any algorithm file.  They are necessary but not sufficient: they confirm
+that the \emph{stated logic} is symmetric, but not that the supporting
+library functions (\texttt{\$neighborsD2}, \texttt{\$applyDir}, etc.)
+implement that logic correctly.  Those library functions should be
+independently verified once and their symmetry properties documented.
 
 % ============================================================
-\section{What a correct implementation requires}
+\section{Is it worth implementing?}
 % ============================================================
 
-Realising the speedup safely requires four steps.
+\textbf{At \texttt{NGrid\,=\,3} (current scale):} Yes, the speedup is
+real.  The hash-based deduplication does not capture G-equivalence, so
+the orbit reduction genuinely reduces FullSimplify calls from ${\sim}300$
+to ${\sim}4$ with D4+translations, cutting 3 minutes to ${\sim}2$
+seconds.  However, 3 minutes is already tolerable for a correctness
+check.  The implementation requires satisfying five non-trivial
+correctness conditions, and a bug in any one of them introduces silent
+false negatives.  The benefit at this scale does not clearly outweigh the
+implementation risk.
 
-\begin{enumerate}
-\item \textbf{Verify the algorithm's symmetry before applying any
-      reduction.}  For each symmetry operation $g$ in the chosen group,
-      check that BFS from state $s$ and BFS from $g\cdot s$ produce
-      equivalent transition structures.  This comparison must use
-      symbolic simplification (not string matching), because the two BFS
-      runs produce the same mathematical expressions written in different
-      forms.  Alternatively, verify by source-code inspection that the
-      seed selection, displacement probabilities, and link-weight
-      computation are all position-independent.  Without this step the
-      reduction is unsound.
+\textbf{At \texttt{NGrid\,=\,6} and beyond:} The checker is entirely
+infeasible without orbit reduction.  $5\times10^9$ pairs cannot be
+constructed, let alone evaluated, in any reasonable time.  The orbit
+reduction to ${\sim}1.7\times10^7$ pairs is not an optimisation; it is
+a prerequisite for the checker to run at all.  At this scale the
+implementation is worth doing despite the complexity.
 
-\item \textbf{Run the full BFS on all $N$ states.}  Do not attempt to
-      shortcut by running BFS only on representative states.  This
-      produces incorrect transition probabilities (see Condition~3).  The
-      reduction controls which pairs are checked, not how probabilities
-      are computed.
-
-\item \textbf{Confirm the component is closed under the symmetry.}  For
-      each state $s$ in the component and each symmetry operation $g$,
-      verify that $g\cdot s$ is also in the same component.  If some
-      images fall outside, restrict the symmetry group to those operations
-      that do map the component to itself, and use that smaller group's
-      size as the speedup factor.
-
-\item \textbf{Compute canonical representatives per pair, without
-      assuming family size.}  For each pair $(s_i,s_j)$, apply all
-      symmetry operations and take the lexicographically smallest
-      resulting pair as the canonical representative.  Check the DB
-      condition only for pairs that are their own canonical
-      representative.  Never skip pairs by assuming the family has a
-      particular size.
-\end{enumerate}
-
-None of these steps changes the \emph{algebraic} content of the DB
-check.  They reduce the \emph{number of times} it is performed --- but
-only after establishing that this reduction is logically sound for the
-specific algorithm and connected component being checked.
-
-% ============================================================
-\section{Conclusion}
-% ============================================================
-
-The symmetry reduction is mathematically sound: if an algorithm and its
-energy function are both invariant under a symmetry group $G$, then
-checking detailed balance for one representative per family of $|G|$
-equivalent pairs is logically equivalent to checking all pairs.  The
-reduction is exact, not approximate.
-
-However, the reduction is \textbf{safe to use only if all of the
-following conditions are satisfied}:
-
-\begin{itemize}
-  \item The algorithm's symmetry is verified symbolically --- not assumed
-        from the physics or from passing a few test cases.
-  \item The connected component found by BFS is closed under the symmetry
-        group (every symmetry image of every state in the component is
-        also in the component).
-  \item The full BFS is run on all $N$ states; BFS is not short-circuited
-        using canonical states.
-  \item Canonical representatives are computed per pair without assuming
-        family size.
-  \item Rotation operations are correctly implemented for the specific
-        lattice size, with no off-by-one errors.
-\end{itemize}
-
-A failure in the first condition in particular can silently convert a
-correct FAIL into an incorrect PASS.  The \texttt{vmmc\_biased.wl}
-example demonstrates this concretely: an algorithm with a rightward bias
-fools a D4 symmetry checker because rotating the bias by $90^\circ$
-produces an unbiased upward move, and the unbiased pair becomes the
-family representative.
-
-The speedup is most valuable at \texttt{NGrid}$\,\geq5$, where the pair
-count without symmetry is computationally infeasible.  At
-\texttt{NGrid}$\,=3$ the existing symbolic deduplication cache already
-captures most of the same benefit in the bottleneck step (FullSimplify
-calls).
+\textbf{Recommendation:} Do not implement for \texttt{NGrid\,=\,3}.
+Implement --- with all five correctness conditions satisfied explicitly
+--- when \texttt{NGrid\,=\,5} or higher is a target.
 
 \end{document}
