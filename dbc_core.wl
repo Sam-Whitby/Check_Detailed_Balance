@@ -40,6 +40,10 @@ $dbcDir = DirectoryName[$InputFileName];
    at floor(nGrid/2), the maximum distinct displacement on the torus. *)
 $dbcCurrentNGrid = 1;
 
+(* Last component dedup stats — updated by CheckDetailedBalance[Fast] after $dbcDedup. *)
+$dbcLastDedupTotal  = 0;
+$dbcLastDedupUnique = 0;
+
 (* ----------------------------------------------------------------
    $jPairSym
    Returns the canonical per-type-pair coupling symbol Jpair<lo><hi>.
@@ -1323,6 +1327,8 @@ CheckDetailedBalanceFast[matrix_Association, allStates_List, symEnergy_,
 
   (* Dedup: run each unique expression once; broadcast results back. *)
   {uniqueIdxs, canonIdx} = $dbcDedup[ntExprs];
+  $dbcLastDedupTotal  = Length[ntExprs];
+  $dbcLastDedupUnique = Length[uniqueIdxs];
   uniqueExprs = ntExprs[[uniqueIdxs]];
 
   (* B+C: Fast-check phase — ParallelMap over all unique expressions. *)
@@ -1442,6 +1448,8 @@ CheckDetailedBalance[matrix_Association, allStates_List, symEnergy_,
 
   (* Dedup: run FullSimplify only on unique expressions. *)
   {uniqueIdxs, canonIdx} = $dbcDedup[ntExprs];
+  $dbcLastDedupTotal  = Length[ntExprs];
+  $dbcLastDedupUnique = Length[uniqueIdxs];
   uniqueExprs = ntExprs[[uniqueIdxs]];
 
   (* B+C: ParallelMap for natural per-expression load balancing; sequential

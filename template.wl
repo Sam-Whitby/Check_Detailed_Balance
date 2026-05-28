@@ -139,3 +139,39 @@ numBeta = 1
            L++];
          ids]
 *)
+
+
+(* ---- $symmetryGroup (optional) ----------------------------------------- *)
+(*
+   Declare the symmetry group of your algorithm so the checker can exploit
+   G-orbit deduplication.  When declared, the canonical-neighbour oracle in
+   $dbcCanonicalCandidates (vmmc_2d_grid.wl) sorts VMMC candidate neighbours
+   in an order that is invariant under the declared symmetries.  This makes
+   seqBernoulli trees syntactically identical for G-related state pairs, so
+   the existing $dbcDedup hash step automatically collapses them — giving an
+   ~|G|-fold speedup in FullSimplify calls with no extra verification logic.
+
+   Supported values:
+     $symmetryGroup = {"translation"}           (* translational invariance only *)
+     $symmetryGroup = {"translation", "D4"}     (* translations + 4-fold rotation + reflection *)
+
+   Requirements for the declaration to be valid:
+     1. Seed selection is uniform over occupied sites (no position weighting).
+     2. Displacement list contains every (dx,dy) paired with (-dx,-dy).
+     3. Energy uses only minimum-image periodic distances (no external field).
+
+   If any of these fail, the declaration is incorrect.  An incorrect declaration
+   does NOT corrupt the DB check — each pair is still evaluated — but the dedup
+   ratio will be lower than claimed.  $dbcDedup simply collapses fewer pairs.
+
+   The check.wls script prints the declared group and dedup statistics per
+   component so you can verify the speedup empirically.
+
+   For algorithms with an external field (e.g. vmmc_2d_field.wl) DO NOT declare
+   $symmetryGroup: the field breaks translational invariance, so G-related pairs
+   produce hash-distinct DB expressions and no orbit dedup occurs.
+
+   This feature is only meaningful for 2D algorithms using $dbcCanonicalCandidates.
+   For 1D or other geometries, omit $symmetryGroup entirely.
+*)
+(* $symmetryGroup = {"translation", "D4"} *)   (* uncomment if applicable *)

@@ -198,11 +198,23 @@ Which[
       $checkCouplingSymmetry[]]];
 
 (* ---- Symmetry group ----
-   Algorithm files declare $symmetryGroup = {"translation"} or {"translation","D4"}.
-   Symmetry reduction is disabled automatically when a field function is active,
-   since fields break translational/rotational invariance.
-   The algorithm author is responsible for declaring the correct symmetry;
-   a mis-declared symmetry can produce false positives in the DB check. *)
+   Algorithm files may declare $symmetryGroup = {"translation"} or {"translation","D4"}.
+   When declared, the canonical neighbour oracle in $dbcCanonicalCandidates ensures
+   seqBernoulli trees are syntactically identical for G-related states, so the
+   existing $dbcDedup hash step automatically collapses G-orbit pairs at no extra cost.
+   The algorithm author is responsible for the declaration — a mis-declared symmetry
+   does not corrupt the DB check (each pair is still evaluated), but the dedup ratio
+   will be lower than claimed if symmetry is over-declared.
+   Fields break translational/rotational invariance; a field + symmetry declaration
+   is not an error but produces no orbit dedup (expressions remain hash-distinct). *)
+$hasSym  = ValueQ[$symmetryGroup] && ListQ[$symmetryGroup] && Length[$symmetryGroup] > 0;
+$hasField = Length[DownValues[fieldF]] > 0 || Length[DownValues[$fieldFConcrete]] > 0;
+If[$hasSym,
+  Print["Symmetry group: ", StringRiffle[$symmetryGroup, ", "],
+    If[$hasField,
+      "  (WARNING: field active — canonical-neighbour oracle inapplicable; no orbit dedup)",
+      "  (canonical-neighbour oracle active — G-orbit dedup via expression hash)"]]];
+
 (* Static symbolic parameters (may be None if only DynamicSymParams is used) *)
 $staticSysParams = If[ValueQ[symParams], symParams, None];
 If[AssociationQ[$staticSysParams],
@@ -551,6 +563,11 @@ $loopBody[bitString_List] := Catch[
            StringPadRight[m1Str, colM1] <> StringPadRight[m2Str, colM2], ""]];
   Do[Print[StringRepeat[" ", colBits], stateRows[[r]]], {r, 2, Length[stateRows]}];
   If[Length[stateRows] > 1, Print[]];
+  If[$hasSym && mode =!= "Numerical" && $dbcLastDedupTotal > 0,
+    Print["  G-orbit dedup: ", $dbcLastDedupUnique, "/", $dbcLastDedupTotal,
+          " unique  (",
+          Round[100. * (1. - $dbcLastDedupUnique / N[$dbcLastDedupTotal])],
+          "% hash-collapsed)"]];
 
   writeProgress[$loopIdx];
   (* Return True when MaxComponents is reached — signals the outer loop to stop *)

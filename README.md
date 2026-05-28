@@ -65,10 +65,11 @@ If[RandomReal[] < MetropolisProb[dE], newState, state]
 ### Optional definitions
 
 ```mathematica
-DynamicSymParams[states_List] := ...   (* per-component symbolic parameters *)
-DisplayState[state_] := ...            (* human-readable state string *)
-ValidStateIDs[maxId_] := ...           (* restrict enumeration to valid IDs *)
-$checkerAbstractParams = {"name1", ...} (* scalar params cleared before BFS *)
+DynamicSymParams[states_List] := ...      (* per-component symbolic parameters *)
+DisplayState[state_] := ...               (* human-readable state string *)
+ValidStateIDs[maxId_] := ...              (* restrict enumeration to valid IDs *)
+$checkerAbstractParams = {"name1", ...}   (* scalar params cleared before BFS *)
+$symmetryGroup = {"translation", "D4"}    (* enables G-orbit dedup — see below *)
 ```
 
 ### Abstract scalar parameters (`$checkerAbstractParams`)
@@ -227,34 +228,59 @@ wolframscript -file animate.wls examples3/vmmc_2d_field.wl \
 | `kawasaki_1d_nonergodic.wl` | Only type-1 particles move; type-2+ frozen | PASS | FAIL |
 | `cluster_1d_fail.wl` | Cluster slides only rightward (asymmetric proposal) | FAIL | FAIL |
 | `vmmc_2d_edit.wl` | VMMC with only 3 of 4 directions (asymmetric proposal) | FAIL on 3×3 | — |
+| `vmmc_biased.wl` | Intentionally broken: rightward displacements proposed 2× as often (breaks proposal symmetry) | FAIL | PASS |
 
 `kawasaki_1d_nonergodic.wl` demonstrates the key case: **DB PASS + Ergodicity FAIL**. Detailed balance cannot detect non-ergodicity; the two checks are independent.
 
 ---
 
-## Potential future improvements
+## Symmetry-aware checking
 
-The checker currently performs an exhaustive BFS over all reachable states in each connected component, checking DB for every pair. This is provably rigorous but can be slow for large lattices or many particle types. Several approaches could reduce the state count and pair count significantly:
+For VMMC algorithms on the periodic square torus whose energy and proposal are invariant under the lattice symmetry group G, G-related state pairs produce identical DB expressions.  The checker exploits this via a **canonical neighbour oracle** that makes the exploitation automatic: no extra verification logic, no orbit-size bookkeeping.
 
-### Geometric symmetry reduction
+### How it works
 
-For algorithms on a square-torus lattice with a symmetric energy and isotropic or uniform proposal distribution, the transition kernel is invariant under the lattice symmetry group G (e.g. translations, or the full D4 group of 4 rotations and 4 reflections). States related by a symmetry transformation have identical DB behaviour. Rather than checking every state independently, one could canonicalise each state to the lexicographic minimum within its orbit under G and run BFS only from canonical representatives. This reduces the number of states by a factor up to |G| (up to 8·nGrid² for full D4 + translation).
+The key observation is that the seqBernoulli random-number tree produced by `$vmmcBuildCluster` is syntactically determined by the *order* in which candidate neighbours are visited.  If two G-related states visit their candidates in the same order, their trees are syntactically identical, and the existing `$dbcDedup` hash step collapses the entire G-orbit to a single expression evaluated once.
 
-**Making this rigorous.** Orbit-size reduction is only valid when the transition matrix itself is G-invariant — i.e. T(g(s)→g(s')) = T(s→s') for all g ∈ G. This allows DB for orbit-representative pairs (c₁, c₂) to be checked with an orbit-size correction factor |orbit(c₁)| on each matrix entry. Exploiting this correctly requires:
+`$dbcCanonicalCandidates` (defined in `vmmc_2d_grid.wl`) replaces the raw neighbour loop with one that sorts candidates by the topological key `(d²(p,q), d²(pPost,q), d²(pRev,q), type)`.  These three squared distances are preserved by every isometry of the torus (all translations, all D4 rotations and reflections), so G-related states always produce the same canonical order — and therefore identical expression trees.
 
-1. *Verifying G-invariance of the algorithm.* This can be done algorithmically: run BFS from a non-canonical orbit member g(c) and check that the resulting transition probabilities match the G-transformed predictions from the BFS of c. This is an exact symbolic check.
+The result: `$dbcDedup` collapses ~|G| pairs to 1 representative automatically.  For D4 + translations on a 3×3 grid, |G|=72; the 72-state two-particle component compresses from 288 non-trivial pairs to **2 unique expressions (99% hash-collapsed)**.
 
-2. *Checking intra-orbit detailed balance.* States within the same orbit can still transition to each other, and these intra-orbit DB conditions are not covered by the inter-orbit orbit-size check. With G-invariance confirmed, intra-orbit DB reduces to verifying that T(c → h(c)) = T(c → h⁻¹(c)) for all group elements h — a proposal-symmetry condition (e.g. clockwise and anti-clockwise rotations are equally likely) that can be checked directly from the BFS output by tracking individual intra-orbit transition probabilities.
+### How to use it
 
-If both conditions are confirmed symbolically, the orbit-aggregated DB check is equivalent to the full pairwise check and the reduction in computational cost is genuine with no loss of rigour.
+Algorithm files that satisfy the three structural conditions below declare:
 
-### Particle-label symmetry
+```mathematica
+$symmetryGroup = {"translation", "D4"}   (* or {"translation"} for translations only *)
+```
 
-Permuting particle labels (which specific labeled particle occupies which site) while holding positions fixed always produces an equivalent DB result — permuting labels merely renames the free coupling variables. However, this symmetry **cannot** be exploited via orbit-size aggregation. The orbit-size framework requires that the transition matrix is invariant under the symmetry, but T(s→s') depends on type-specific coupling symbols `$jPairSym[a, b]`, so T(π(s)→π(s')) ≠ T(s→s') when couplings are abstract free parameters. Applying orbit-size scaling with label-permutation orbits inflates the matrix entries and produces false positive DB violations even for correct algorithms (verified empirically). For diffusive algorithms such as Kawasaki and VMMC, label-permuted states all lie in the same connected component anyway, so there would be no reduction in the number of components to check even if the orbit reduction were valid.
+And use `$dbcCanonicalCandidates` in `$vmmcBuildCluster` instead of the raw `DeleteDuplicates@Join[$neighborsD2[...]]` + If-guard pattern.  See `vmmc_lattice.wl` for a complete example.
 
-### Expression deduplication
+The checker prints the declared group and per-component dedup statistics:
 
-The current checker already deduplicates syntactically identical DB expressions before passing them to `FullSimplify` (the `$dbcDedup` step). Geometric symmetry would make more expressions identical by construction, amplifying this existing speedup.
+```
+Symmetry group: translation, D4  (canonical-neighbour oracle active — G-orbit dedup via expression hash)
+...
+  G-orbit dedup: 2/288 unique  (99% hash-collapsed)
+```
+
+### Conditions for a valid declaration
+
+1. Seed selection is `RandomChoice[occupied]` — uniform over occupied sites, no position-dependent weighting.
+2. Displacement list contains every `(dx,dy)` paired with `(-dx,-dy)` (proposal symmetry `P(d)=P(-d)`).
+3. Energy uses only minimum-image periodic distances — no external field.
+
+An incorrect `$symmetryGroup` declaration does not corrupt the DB check.  Each pair is still fully evaluated; `$dbcDedup` simply collapses fewer pairs if the expressions are not hash-identical.  The dedup percentage printed by the checker is the empirical confirmation that the declaration is valid.
+
+### What it does NOT do
+
+- It does not reduce the number of states or BFS work — the full connected component is still explored.
+- It does not verify G-invariance programmatically; that is the algorithm author's responsibility.
+- It is not applicable to algorithms with external fields (`vmmc_2d_field.wl`): fields break translational invariance, so G-related pairs produce hash-distinct expressions and no orbit dedup occurs.  A field algorithm should omit `$symmetryGroup`.
+
+### vmmc_biased.wl: a counterexample
+
+`vmmc_biased.wl` duplicates rightward displacements so `P(dx>0,dy) = 2·P(dx<0,dy)`.  This breaks DB (correctly caught by the checker with FAIL).  Instructively, translation invariance is still satisfied — the bias is direction-based, not position-based — so a translation-only speedup would still correctly report FAIL.  But D4 invariance is broken: a 90° rotation maps rightward moves to upward moves, which are unbiased.  A D4 orbit representative may be an unbiased upward-move pair; the checker would evaluate that pair, find DB satisfied, and incorrectly certify the whole orbit.  This confirms that `$symmetryGroup = {"translation", "D4"}` must not be declared for `vmmc_biased.wl`.
 
 ---
 
@@ -266,7 +292,7 @@ The current checker already deduplicates syntactically identical DB expressions 
 ### FastChecker (`FastChecker=1`)
 After `PiecewiseExpand`, DB expressions reduce to sums of `c·exp(−β·L)` terms. DB holds iff all coefficient groups sum to zero — verified by `Expand[...] === 0` (microseconds). Falls back to `FullSimplify` for inconclusive cases. Works directly for Metropolis acceptance; falls back gracefully for Barker/heat-bath.
 
-Both checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (speedup ∝ translational symmetry) → threshold-based `ParallelMap`.
+Both checkers share the same efficiency pipeline: trivial-zero filter → syntactic deduplication (`$dbcDedup`; collapses G-orbit pairs when the canonical-neighbour oracle is active) → threshold-based `ParallelMap`.
 
 ### FastChecker internals: Piecewise case feasibility
 

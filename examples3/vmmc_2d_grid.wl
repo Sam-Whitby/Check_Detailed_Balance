@@ -59,6 +59,52 @@ $neighborsD2[s_, nGrid_] := $neighborsD2[s, nGrid] =
 
 
 (* ================================================================
+   Canonical neighbour oracle for symmetry-aware checking
+   ================================================================
+   $dbcCanonicalCandidates returns the VMMC candidate neighbours of
+   cluster particle p in a canonical (symmetry-invariant) order.
+
+   The three distance arguments d²(p,q), d²(pPost,q), d²(pRev,q) are
+   topological scalars preserved by every isometry of the torus (all
+   translations, and all D4 rotations/reflections).  Sorting by the
+   tuple (d²_init, d²_fwd, d²_rev, type) therefore assigns the same
+   ordering to geometrically G-related states, so the seqBernoulli
+   random-number trees produced by $vmmcBuildCluster are syntactically
+   identical for G-orbit pairs.  The existing $dbcDedup hash step then
+   collapses those pairs automatically, giving an ~|G|-fold speedup
+   in FullSimplify calls with no extra verification logic.
+
+   Arguments:
+     p         — site index of the current cluster particle
+     pPost     — site p would move to ($applyDir[p, dir, nGrid])
+     pRev      — site p would come from ($applyDir[p, -dir, nGrid])
+     state     — current state vector
+     nGrid     — grid side length
+     inCluster — Association of sites already in the cluster
+
+   Returns a list of site indices: occupied, not in cluster, sorted
+   by the canonical key (d²(p,q), d²(pPost,q), d²(pRev,q), type).
+
+   This function should be used in $vmmcBuildCluster for algorithm
+   files that declare $symmetryGroup.  It replaces the raw
+   DeleteDuplicates@Join[$neighborsD2[...]] computation + If-guard. *)
+
+$dbcCanonicalCandidates[p_, pPost_, pRev_, state_, nGrid_, inCluster_] :=
+  Module[{rawNbrs, occupied},
+    rawNbrs = DeleteDuplicates @ Join[
+                $neighborsD2[p,     nGrid],
+                $neighborsD2[pPost, nGrid],
+                $neighborsD2[pRev,  nGrid]];
+    occupied = Select[rawNbrs,
+      Function[q, state[[q]] =!= 0 && !KeyExistsQ[inCluster, q]]];
+    SortBy[occupied, {
+      $torusD2[p,    #, nGrid] &,
+      $torusD2[pPost, #, nGrid] &,
+      $torusD2[pRev,  #, nGrid] &,
+      state[[#]] &}]]
+
+
+(* ================================================================
    Checker interface
    ================================================================ *)
 

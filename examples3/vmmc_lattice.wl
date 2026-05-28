@@ -91,14 +91,23 @@ $displacements = DeleteCases[
   Flatten[Table[{dx, dy}, {dx, -$nStep, $nStep}, {dy, -$nStep, $nStep}], 1],
   {0, 0}];
 
+(* Declare symmetry group for the checker's canonical-neighbour oracle.
+   This enables ~|G|-fold speedup in FullSimplify calls via expression-hash
+   deduplication of G-orbit pairs.  The uniform-box proposal and periodic
+   minimum-image energy are both D4 + translation invariant by construction.
+   See $dbcCanonicalCandidates in vmmc_2d_grid.wl for details. *)
+$symmetryGroup = {"translation", "D4"};
+
 
 (* ================================================================
-   Cluster builder  (identical to vmmc_continuous.wl)
+   Cluster builder
    ================================================================
    Whitelam–Geissler virtual-move cluster construction.
-   For each cluster particle p, tests links to all neighbours within
-   the interaction shells of p, p+dir, and p−dir (union of three
-   shells) to ensure no interaction energy change is missed.
+   Uses $dbcCanonicalCandidates (from vmmc_2d_grid.wl) to iterate
+   neighbours in canonical topological order (sorted by d²_init,
+   d²_fwd, d²_rev, type) so G-related states produce syntactically
+   identical seqBernoulli trees and hash-dedup in the checker
+   automatically collapses G-orbit pairs.
    Returns the cluster list, or None on frustration. *)
 
 $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
@@ -107,7 +116,7 @@ $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
     inCluster  = <|seed -> True|>,
     queue      = {seed},
     frustrated = False,
-    p, pType, pPost, pRev, nbrs, q, qType,
+    p, pType, pPost, pRev, cands, q, qType,
     eInit, eFwd, eRev, wFwd, wRev, r1, r2
   },
     While[queue =!= {} && !frustrated,
@@ -116,55 +125,54 @@ $vmmcBuildCluster[state_, nGrid_, seed_, dir_] :=
       pPost = $applyDir[p,  dir, nGrid];
       pRev  = $applyDir[p, {-dir[[1]], -dir[[2]]}, nGrid];
 
-      nbrs = DeleteDuplicates @ Join[
-               $neighborsD2[p,     nGrid],
-               $neighborsD2[pPost, nGrid],
-               $neighborsD2[pRev,  nGrid]];
+      (* Canonical order: sort occupied non-cluster neighbours by
+         (d²_init, d²_fwd, d²_rev, type).  G-related states produce the
+         same ordering, so seqBernoulli trees are syntactically identical
+         and $dbcDedup collapses G-orbit pairs automatically. *)
+      cands = $dbcCanonicalCandidates[p, pPost, pRev, state, nGrid, inCluster];
 
       Do[
-        q = nbrs[[k]];
-        If[state[[q]] =!= 0 && !KeyExistsQ[inCluster, q],
-          qType = state[[q]];
+        q     = cands[[k]];
+        qType = state[[q]];
 
-          eInit = $virtualPairEnergy[pType, qType, p,     q, nGrid];
-          eFwd  = $virtualPairEnergy[pType, qType, pPost, q, nGrid];
-          eRev  = $virtualPairEnergy[pType, qType, pRev,  q, nGrid];
+        eInit = $virtualPairEnergy[pType, qType, p,     q, nGrid];
+        eFwd  = $virtualPairEnergy[pType, qType, pPost, q, nGrid];
+        eRev  = $virtualPairEnergy[pType, qType, pRev,  q, nGrid];
 
-          wFwd = Piecewise[{
-              {1,                                eFwd === Infinity},
-              {1 - Exp[\[Beta] (eInit - eFwd)],  eInit < eFwd}},
-            0];
-          wRev = Piecewise[{
-              {1,                                eRev === Infinity},
-              {1 - Exp[\[Beta] (eInit - eRev)],  eInit < eRev}},
-            0];
+        wFwd = Piecewise[{
+            {1,                                eFwd === Infinity},
+            {1 - Exp[\[Beta] (eInit - eFwd)],  eInit < eFwd}},
+          0];
+        wRev = Piecewise[{
+            {1,                                eRev === Infinity},
+            {1 - Exp[\[Beta] (eInit - eRev)],  eInit < eRev}},
+          0];
 
-          r1 = RandomReal[];
-          If[r1 <= wFwd,
-            r2 = RandomReal[];
-            If[r2 > Piecewise[{
-                  {1,
-                      eFwd === Infinity && eRev === Infinity},
-                  {1 - Exp[\[Beta] (eInit - eRev)],
-                      eFwd === Infinity && eInit < eRev},
-                  {0,
-                      eFwd === Infinity},
-                  {1,
-                      eRev === Infinity && eInit < eFwd},
-                  {Min[(1 - Exp[\[Beta] (eInit - eRev)]) /
-                        (1 - Exp[\[Beta] (eInit - eFwd)]), 1],
-                   eInit < eFwd && eInit < eRev},
-                  {0,
-                      eInit < eFwd}},
-                0],
-              frustrated = True; Break[],
-              AppendTo[cluster, q];
-              inCluster[q] = True;
-              AppendTo[queue, q]
-            ]
+        r1 = RandomReal[];
+        If[r1 <= wFwd,
+          r2 = RandomReal[];
+          If[r2 > Piecewise[{
+                {1,
+                    eFwd === Infinity && eRev === Infinity},
+                {1 - Exp[\[Beta] (eInit - eRev)],
+                    eFwd === Infinity && eInit < eRev},
+                {0,
+                    eFwd === Infinity},
+                {1,
+                    eRev === Infinity && eInit < eFwd},
+                {Min[(1 - Exp[\[Beta] (eInit - eRev)]) /
+                      (1 - Exp[\[Beta] (eInit - eFwd)]), 1],
+                 eInit < eFwd && eInit < eRev},
+                {0,
+                    eInit < eFwd}},
+              0],
+            frustrated = True; Break[],
+            AppendTo[cluster, q];
+            inCluster[q] = True;
+            AppendTo[queue, q]
           ]
         ],
-        {k, Length[nbrs]}
+        {k, Length[cands]}
       ]
     ];
     If[frustrated, None, cluster]
