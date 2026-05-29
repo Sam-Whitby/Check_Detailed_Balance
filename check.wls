@@ -43,7 +43,7 @@ $nKernels = 0;
 Quiet[Check[LaunchKernels[]; $nKernels = Length[Kernels[]], $nKernels = 0]];
 If[$nKernels > 0,
   Print["Parallel: ", $nKernels, " kernels launched."],
-  Print["Note: parallel kernel launch failed — running single-threaded."]];
+  Print["Note: parallel kernel launch failed -- running single-threaded."]];
 
 (* Distribute fast-checker helpers to subkernels (no-op if no kernels) *)
 If[$nKernels > 0, $dbcDistributeFastChecker[]];
@@ -127,15 +127,15 @@ Do[
 
 (* ---- Validate option combinations ---- *)
 If[szPure && !fastChecker,
-  Print["Note: SZPure=1 requires FastChecker=1 — enabling automatically."];
+  Print["Note: SZPure=1 requires FastChecker=1 -- enabling automatically."];
   fastChecker = True];
 If[szPure && !szChecker,
   szChecker = True];  (* SZPure implies SZChecker internally; keep consistent *)
 If[trustSymmetry && nGrid === None,
-  Print["Note: TrustSymmetry=1 requires NGrid=N — disabling TrustSymmetry."];
+  Print["Note: TrustSymmetry=1 requires NGrid=N -- disabling TrustSymmetry."];
   trustSymmetry = False];
 If[trustSymmetry && seedBitStrings =!= None,
-  Print["Note: TrustSymmetry=1 is incompatible with SeedBitStrings — disabling TrustSymmetry."];
+  Print["Note: TrustSymmetry=1 is incompatible with SeedBitStrings -- disabling TrustSymmetry."];
   trustSymmetry = False];
 
 (* ---- Validate MaxBitString ---- *)
@@ -216,7 +216,7 @@ $hasDynParams = Length[DownValues[DynamicSymParams]] > 0;
 $checkCouplingSymmetry[] := (
   $coupSymViolations = CheckCouplingSymmetry[{1,2,3,4,5}, {1,2,4,5,8,9,10}];
   If[$coupSymViolations =!= {},
-    Print["ERROR: couplingJ is NOT symmetric — detailed balance cannot hold."];
+    Print["ERROR: couplingJ is NOT symmetric -- detailed balance cannot hold."];
     Print["  First violation: a=", $coupSymViolations[[1]]["a"],
           "  b=", $coupSymViolations[[1]]["b"],
           "  d2=", $coupSymViolations[[1]]["d2"],
@@ -265,11 +265,11 @@ If[$hasSym,
   Print["Symmetry group: ", StringRiffle[$symmetryGroup, ", "],
     Which[
       $hasField,
-        "  (WARNING: field active — G-orbit dedup inapplicable)",
+        "  (WARNING: field active -- G-orbit dedup inapplicable)",
       $useCanonicalOracle,
         "  (oracle: $vmmcCandidates \[Rule] $dbcCanonicalCandidates during BFS; G-invariance check active)",
       True,
-        "  (declared; algorithm uses raw neighbour loop — oracle substitution inactive)"]]];
+        "  (declared; algorithm uses raw neighbour loop -- oracle substitution inactive)"]]];
 
 (* $bfsAlg: algorithm used for BFS.  When oracle is active, wraps $alg so every
    call to $vmmcCandidates inside the algorithm is redirected to $dbcCanonicalCandidates.
@@ -383,7 +383,7 @@ If[failFast && mode =!= "Numerical",
   Print["FailFast:      Enabled (stop on first violation, print debug info)"]];
 If[physFidelity, Print["PhysFidelity:  Enabled (T_phys Glauber; M1=EigRatio, M2=KLFidelity)"]];
 If[trustSymmetry,
-  Print["TrustSymmetry: ENABLED — BFS from G-orbit reps only (~|G|-fold speedup)"];
+  Print["TrustSymmetry: ENABLED -- BFS from G-orbit reps only (~|G|-fold speedup)"];
   Print["               WARNING: G-invariance and ergodicity are ASSUMED, NOT verified."];
   Print["               Run without TrustSymmetry periodically to verify both."]];
 Print[StringRepeat["=", totalCols]];
@@ -483,6 +483,7 @@ $loopBody[bitString_List] := Catch[
                DisplayState[state], ToString[state]];
 
   (* ---- BFS: discover connected component ---- *)
+  $tsTrustMsg = None;  (* set in TrustSymmetry path; printed after the result row *)
   If[trustSymmetry && $useCanonicalOracle,
 
     (* ---- TrustSymmetry orbit path ----------------------------------------
@@ -532,8 +533,9 @@ $loopBody[bitString_List] := Catch[
       matrix = $dbcExpandOrbitsToMatrix[repLeavesAssoc, repToOrbitMap, nGrid];
       coveredAssoc = Join[coveredAssoc, Association[# -> True & /@ allStates]];
       testedCount++;
-      Print["  TrustSymmetry: ", nRep, " orbit rep(s) / ", nStates,
-            " states  (|G|=", nG, ", ", Round[speedup, 0.1], "\[Times] BFS reduction)"]],
+      $tsTrustMsg = "  TrustSymmetry: " <> ToString[nRep] <> " orbit rep(s) / " <>
+                    ToString[nStates] <> " states  (|G|=" <> ToString[nG] <> ", " <>
+                    ToString[Round[speedup, 0.1]] <> "x BFS reduction)"],
 
     (* ---- Normal BFS path ---- *)
     treeData = BuildTreeAT[state, $bfsAlg,
@@ -714,6 +716,7 @@ $loopBody[bitString_List] := Catch[
           " unique  (",
           Round[100. * (1. - $dbcLastDedupUnique / N[$dbcLastDedupTotal])],
           "% hash-collapsed)"]];
+  If[$tsTrustMsg =!= None, Print[$tsTrustMsg]];
 
   (* ---- G-invariance check ----
      Verifies T(s→s') === T(g(s)→g(s')) for each declared generator g.
@@ -724,7 +727,7 @@ $loopBody[bitString_List] := Catch[
      to obtain a genuine G-invariance verification. *)
   If[$useCanonicalOracle,
     If[trustSymmetry,
-      Print["  G-invariance: ASSUMED (TrustSymmetry active — not verified this run)"],
+      Print["  G-invariance: ASSUMED (TrustSymmetry active -- not verified this run)"],
       With[{gviol = CheckGInvariance[matrix, allStates, $symmetryGroup]},
         If[gviol === {},
           gInvPassCount++;
@@ -732,7 +735,7 @@ $loopBody[bitString_List] := Catch[
           gInvFailCount++;
           With[{v1 = gviol[[1]]},
             Print["  G-invariance: FAIL  (", Length[gviol], " generator(s) violated)",
-                  "  — ", v1["gen"],
+                  "  -- ", v1["gen"],
                   If[v1["issue"] === "orbit-escapes-component",
                     ": g(s) not in component for s=" <> ToString[v1["s"]],
                     ": T mismatch at s=" <> ToString[v1["s"]] <> " s2=" <> ToString[v1["s2"]]]]];
@@ -789,7 +792,7 @@ If[$useCanonicalOracle && (gInvPassCount + gInvFailCount) > 0,
 If[ergoFailCount > 0,
   Print["*** ERGODICITY VIOLATION DETECTED ***"]];
 If[$useCanonicalOracle && gInvFailCount > 0,
-  Print["*** G-INVARIANCE VIOLATION DETECTED — $symmetryGroup declaration is incorrect ***"]];
+  Print["*** G-INVARIANCE VIOLATION DETECTED -- $symmetryGroup declaration is incorrect ***"]];
 If[symFailCount == 0 && numFailCount == 0 && testedCount > 0,
   Print["All tested systems satisfy detailed balance."],
   If[testedCount == 0,

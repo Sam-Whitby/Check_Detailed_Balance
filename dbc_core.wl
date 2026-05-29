@@ -1947,9 +1947,12 @@ $dbcAllGroupPerms[nGrid_Integer, symGroup_List] :=
     drDcs   = If[MemberQ[symGroup, "translation"],
       Flatten[Table[{dr, dc}, {dr, 0, nGrid-1}, {dc, 0, nGrid-1}], 1],
       {{0, 0}}];
+    (* Iterate drdc over elements of drDcs, extracting dr=drdc[[1]], dc=drdc[[2]].
+       The destructuring form {{dr, dc}, drDcs} can fail to evaluate when drDcs is
+       a Module-local symbol; {drdc, drDcs} with explicit Part access is robust. *)
     Flatten[
-      Table[$dbcMakeGPerm[ri, dr, dc, nGrid],
-            {ri, rotIdxs}, {{dr, dc}, drDcs}],
+      Table[$dbcMakeGPerm[ri, drdc[[1]], drdc[[2]], nGrid],
+            {ri, rotIdxs}, {drdc, drDcs}],
       1]]
 
 (* ----------------------------------------------------------------
