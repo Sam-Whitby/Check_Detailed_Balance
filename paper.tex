@@ -1,0 +1,1511 @@
+%% DetailedBalanceChecker — expanded manuscript draft
+%% Target: J. Chem. Theory Comput.
+%% Author: S. Whitby
+%%
+%% Build: pdflatex paper && bibtex paper && pdflatex paper && pdflatex paper
+%% (or use latexmk -pdf paper)
+
+\documentclass[twocolumn,10pt]{article}
+\usepackage[top=1.8cm,bottom=2.0cm,left=1.4cm,right=1.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{caption}
+\usepackage{listings}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  framesep=3pt,
+  xleftmargin=5pt,
+  xrightmargin=5pt
+}
+
+\setlength{\columnsep}{0.55cm}
+\captionsetup{font=small, labelfont=bf}
+
+% Lattice-site box
+\newcommand{\lsite}[1]{\fbox{\ensuremath{\,#1\,}}}
+% Metropolis min-expression shorthand
+\newcommand{\Mf}[1]{\min\!\bigl(1,e^{#1}\bigr)}
+% Tool name shorthand
+\newcommand{\DBC}{\textit{DetailedBalanceChecker}}
+
+\title{\textbf{Symbolic Verification of Detailed Balance\\[-2pt] in Monte Carlo Algorithms}}
+\author{S.~Whitby}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+% ============================================================
+\begin{abstract}
+\noindent
+We present \DBC{}, a computer-algebra framework for the exact, symbolic
+verification of detailed balance in Monte Carlo (MC) algorithms.  Every call
+to the random-number generator is intercepted and mapped to reads from a
+binary tape, enabling a breadth-first search (BFS) over all execution paths
+of the algorithm.  The resulting symbolic transition matrix is tested against
+the detailed-balance condition algebraically, treating coupling constants,
+field functions, and inverse temperature as free symbols.  A PASS constitutes
+a mathematical proof valid for all parameter values simultaneously; a FAIL
+identifies the exact symbolic expressions that violate balance for each
+offending state pair.  The primary verification strategy exploits the
+algebraic structure of Metropolis-type acceptance: after expanding over sign
+cases of the coupling constants, each detailed-balance expression reduces to
+a sum of terms with common exponential factors, verified in microseconds by
+polynomial coefficient comparison.  A canonical-ordering oracle and
+generator-based symmetry check enable exploitation of the lattice symmetry
+group $G$ to compress the BFS and the verification, yielding near-$|G|$-fold
+reductions in cost.  Ergodicity is checked independently via BFS state-count
+comparison.  Physical fidelity metrics quantify how closely the MC transition
+matrix matches reference Glauber dynamics.  We demonstrate the framework on
+1D Kawasaki dynamics, a rightward-only cluster algorithm that passes every
+numerical statistical test while violating detailed balance, and 2D Virtual
+Move Monte Carlo (VMMC) in both correct and broken variants.  Intended use
+cases include regression testing, algorithm development, and as a formal
+oracle in an LLM-driven algorithm discovery loop.  The implementation is
+available at \url{https://github.com/Sam-Whitby/CheckDetailedBalance2}.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+
+Monte Carlo (MC) simulation is the primary tool for sampling equilibrium
+distributions in statistical physics and soft
+matter~\cite{Metropolis1953,Frenkel2002,Allen1987}.  The correctness of a MC
+algorithm rests on two conditions: ergodicity (every state is reachable from
+every other) and the \emph{detailed balance} (DB) condition
+\begin{equation}
+  T(i \to j)\,\pi(i) \;=\; T(j \to i)\,\pi(j),
+  \label{eq:db}
+\end{equation}
+where $T(i\to j)$ is the transition rate from microstate $i$ to $j$ and
+$\pi(i)\propto e^{-\beta E(i)}$ is the target Boltzmann weight.  Together
+with ergodicity, Eq.~\eqref{eq:db} guarantees convergence to the correct
+equilibrium distribution~\cite{Levin2009}.
+
+Algorithm correctness is overwhelmingly assessed by numerical tests.  The
+most common approach runs a long Markov chain and compares the empirical
+stationary distribution to the Boltzmann distribution via the
+Kullback--Leibler (KL) divergence~\cite{Newman1999} or a $\chi^2$
+goodness-of-fit statistic.  The joint-distribution test of
+Geweke~\cite{Geweke2004} is the most principled numerical approach,
+comparing forward and time-reversed marginals of successive chain states.
+These tests share a fundamental limitation: they are statistical and
+therefore cannot certify correctness.  They can only fail to detect a
+violation.  An algorithm whose stationary distribution happens to be
+Boltzmann-distributed under the specific energy function and parameter values
+used in the test will pass every numerical test, even if it violates detailed
+balance and would sample incorrectly for a different energy~--- see
+Section~\ref{sec:cluster} for a concrete example.
+
+Analytical proofs of detailed balance for specific algorithms---Metropolis--Hastings~\cite{Hastings1970},
+VMMC~\cite{Whitelam2007,Whitelam2009}, Swendsen--Wang~\cite{SwendsenWang1987},
+Wolff~\cite{Wolff1989}---are algorithm-specific and laborious.  They are
+also susceptible to the same sign errors and missed edge cases that numerical
+tests at benign parameters cannot detect.  For complex cluster algorithms,
+where the acceptance criterion emerges from a multi-step cluster-growth
+procedure, the analytical proof requires careful book-keeping of all path
+weights, and subtle implementation errors may not be caught until the
+algorithm is applied to a model where the violation is not hidden by energy
+symmetries.
+
+A more general reversibility condition---the Kolmogorov cycle
+criterion~\cite{Kelly1979}---states that the chain is reversible if and only
+if the product of transition rates is equal in both directions around every
+closed loop of states.  Checking this without knowing the stationary
+distribution requires either enumerating all cycles or matrix
+diagonalisation at $\mathcal{O}(N^3)$ cost~\cite{Norris1998}, which becomes
+algebraically intractable for symbolic parameter values.  When the energy $E$
+is known, as it always is in physics simulations, detailed balance reduces
+instead to $N(N-1)$ pairwise checks of Eq.~\eqref{eq:db}---a tractable
+algebraic problem.
+
+We present an automated framework for the \emph{exact symbolic} verification
+of Eq.~\eqref{eq:db}.  The framework intercepts every random call in the
+algorithm, constructs an exact symbolic transition matrix by BFS over all
+execution paths, and verifies detailed balance algebraically.  All coupling
+constants and field functions are treated as free real symbols, so a PASS
+constitutes a mathematical proof valid for all parameter values
+simultaneously, including parameter combinations not accessible to numerical
+testing.  A FAIL yields exact symbolic expressions identifying which
+transitions violate detailed balance and by how much, enabling diagnosis and
+correction.  We also describe how symmetry of the state space under a lattice
+symmetry group $G$ can be exploited to achieve near-$|G|$-fold speedups in
+both the BFS and the verification step, extending the practical reach of the
+method.
+
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+The dominant paradigm for MC correctness checking remains numerical.
+Histogram comparison against the Boltzmann distribution via KL divergence or
+$\chi^2$ statistics~\cite{Newman1999} is standard practice, and the
+joint-distribution test of Geweke~\cite{Geweke2004}---which compares forward
+and time-reversed marginals of successive chain states---is the most
+principled purely numerical approach.  Both are statistical.
+
+Formal methods for Markov chains have advanced considerably through
+\emph{parametric model checking}~\cite{Daws2004}, implemented in PRISM~\cite{Kwiatkowska2011}
+and Storm~\cite{Dehnert2017}.  In principle, steady-state probabilities
+computed by these tools could be combined with transition-matrix entries to
+check detailed balance.  However, PRISM and Storm operate on models specified
+in dedicated input languages.  Translating a Monte Carlo algorithm into such
+a format requires essentially the same case analysis as writing an analytic
+proof, and must be redone for each algorithmic variant.  Detailed balance is
+not a native property of any standard temporal logic, so any verification
+requires additional post-processing outside the model-checker.
+
+Exact symbolic inference for probabilistic programs---PSI~\cite{Gehr2016}
+and similar tools---can in principle yield a single transition probability
+$T(i\to j)$ for a specific state pair.  However, these systems target
+Bayesian inference, not exhaustive relational checking across all state
+pairs.
+
+It is worth noting that detailed balance is \emph{sufficient} but not
+\emph{necessary} for a Boltzmann stationary distribution.  The weaker global
+balance condition suffices~\cite{Manousiouthakis1999}, and algorithms such as
+event-chain Monte Carlo (ECMC)~\cite{Bernard2009}---which achieves
+rejection-free updates with correct equilibrium statistics by satisfying
+only global balance via lifting variables---would \emph{correctly} fail the
+detailed-balance checker.  This is a feature: it defines a precise and
+demanding search objective.
+
+To the authors' knowledge, no existing framework provides automated
+detailed-balance checking as a first-class operation for Monte Carlo
+algorithms written as executable code, nor verifies correctness across the
+full parameter space in a single algebraic pass.
+
+% ============================================================
+\section{Theoretical Framework}
+\label{sec:method}
+
+We describe the algorithm in abstract terms, independent of any particular
+implementation.
+
+\subsection{Problem formulation}
+
+We consider a finite set of microstates $\mathcal{S}$ with a user-supplied
+energy function $E:\mathcal{S}\to\mathbb{R}$.  An MC algorithm is a
+function $\mathcal{A}:\mathcal{S}\times\{0,1\}^\ast\to\mathcal{S}$ mapping
+an initial state and a binary tape to a final state, where each random call
+inside $\mathcal{A}$ reads one or more bits from the tape.  The transition
+probability from state $i$ to state $j$ is
+\begin{equation}
+  T(i\to j) = \sum_{\mathbf{b}:\,\mathcal{A}(i,\mathbf{b})=j} w(\mathbf{b}),
+\end{equation}
+where $w(\mathbf{b})$ is the probability of the bit sequence $\mathbf{b}$.
+The goal is to verify Eq.~\eqref{eq:db} symbolically, treating all model
+parameters (coupling constants, field values, inverse temperature $\beta$) as
+free real symbols.
+
+\subsection{State enumeration via \textsc{BitsToState}}
+\label{sec:bitstostate}
+
+The framework requires a user-supplied injective map
+$\textsc{BitsToState}:\{0,1\}^\ast\to\mathcal{S}\cup\{\varnothing\}$ from
+binary strings to states, returning $\varnothing$ for strings that do not
+correspond to valid states.  This induces a total ordering of states by
+bit-string length: shorter strings enumerate simpler states first.  The
+checker iterates over all binary strings up to a user-specified maximum
+length, calling $\textsc{BitsToState}$ on each, and launches a BFS
+from each valid seed state.  Any newly discovered state becomes an
+additional seed.
+
+For 2D square-lattice systems, the reference implementation provides a
+bijective encoding of labeled-particle configurations into integers: a
+non-negative integer $\mathrm{ID}$ encodes (i) the lattice size $L^2$, via
+a prefix count over all arrays of smaller size; (ii) the particle number
+$N$, via a secondary prefix; (iii) the sorted particle positions, ranked by
+the combinatorial number system; and (iv) the assignment of particle types to
+positions, ranked by the factorial number system.  Each step has an explicit
+inverse, so any integer can be decoded to the corresponding state.
+$\textsc{BitsToState}$ interprets a bit string as the binary representation
+of $\mathrm{ID}$ and calls the decoder.  Additional validity filters (e.g.,
+requiring $L^2$ to be a perfect square for 2D grids) return $\varnothing$
+for invalid IDs, causing the checker to skip those strings at zero BFS cost.
+
+\subsection{Reducing randomness to a binary tape}
+\label{sec:bits}
+
+Every random call inside the algorithm is intercepted and replaced by a
+deterministic token that reads from a global binary tape
+$\mathbf{b}=b_1b_2\cdots\in\{0,1\}^\ast$.  Four interception rules cover all
+supported call types.
+
+\smallskip\noindent\textbf{Discrete uniform integers.}
+Sampling from $\{l,\ldots,h\}$ uses rejection sampling over blocks of
+$c=\lceil\log_2(h-l+1)\rceil$ bits.  A block $B$ maps to outcome $l+B$ if
+$B < h-l+1$; otherwise a new block is read.  Summing over all retry paths
+gives each outcome weight $1/(h-l+1)$ exactly, matching the target uniform
+distribution.  This handles \texttt{RandomInteger[\{lo,hi\}]} and uniform
+\texttt{RandomChoice} over a list.
+
+\smallskip\noindent\textbf{Continuous uniform reals (interval tracking).}
+A call $U\sim\mathrm{Uniform}[0,1]$ creates a symbolic token representing a
+latent variable $U$ on the interval $[0,1]$.  Each subsequent comparison $U
+< p$ reads one bit: bit~0 restricts $U$ to $[0,p]$ with probability weight
+$p/(h-l)$ (where $[l,h]$ is the current interval); bit~1 restricts to
+$[p,h]$ with weight $(h-p)/(h-l)$.  Successive comparisons on the same
+variable---possibly to different thresholds in different branches---are all
+conditioned correctly on all prior constraints, implementing exact
+inverse-CDF sampling.  This handles \texttt{RandomReal[]} and is critical
+for Metropolis acceptance steps, where a single $U$ is compared to a single
+threshold but that threshold may itself be symbolic.
+
+\smallskip\noindent\textbf{Weighted discrete choice.}
+Sampling from a weighted distribution
+$\{(w_k, x_k)\}_{k=1}^n$ with $\sum_k w_k = W$ is decomposed into a
+sequential chain of Bernoulli trials using the binary representation of the
+cumulative distribution.  Specifically, starting from the full weight sum
+$W$, the first trial asks whether $U < w_1/W$: bit~0 selects $x_1$ (with
+weight $w_1/W$); bit~1 continues to a trial on the remaining distribution.
+Each fresh trial uses an independent interval-tracking token.  The weight of
+any complete path to outcome $x_k$ is exactly $w_k/W$.  This handles
+\texttt{RandomChoice[weights $\to$ elements]}.
+
+\smallskip\noindent\textbf{Discretised Gaussian jumps.}
+For algorithms on lattices where displacements are necessarily integer-valued,
+a normally distributed jump of standard deviation $\sigma$ can be represented
+exactly.  The probability that a continuous $\mathcal{N}(0,\sigma^2)$ random
+variable falls in the unit bin centred on integer $d$ is
+\begin{equation}
+  w(d) = \tfrac{1}{2}\!\left[\operatorname{erf}\!\left(\tfrac{s_d+\frac{1}{2}}{\sqrt{2}\,\sigma}\right)
+  - \operatorname{erf}\!\left(\tfrac{s_d-\frac{1}{2}}{\sqrt{2}\,\sigma}\right)\right],
+  \label{eq:normalbin}
+\end{equation}
+where $s_d$ is the signed displacement on the ring.  The weights are
+symmetric ($w(d)=w(-d)$), normalised, and sum to one over all integer
+displacements within a truncation range.  The displacement is drawn via
+weighted discrete choice with these weights, which the checker decomposes
+into sequential Bernoulli trials.  The resulting symbolic transition matrix
+entries contain \texttt{erf} functions with $\sigma$ as a free parameter, and
+detailed balance is verified for all values of $\sigma$ simultaneously.
+
+All four reductions are exact: integrating the branch weights over all bit
+sequences recovers the original probability measure of each random call.
+Calls of each type may be combined arbitrarily within a single algorithm
+execution; the symbolic weight of any complete path is the product of the
+weights of all individual bits read.
+
+\subsection{BFS construction of the transition matrix}
+\label{sec:bfs}
+
+\begin{algorithm}[t]
+\caption{Symbolic transition-matrix construction (BFS)}
+\label{alg:bfs}
+\begin{algorithmic}[1]
+\Require Algorithm $\mathcal{A}$, seed state $s_0$, energy $E$
+\State $\mathrm{queue}\leftarrow\{(s_0,\varepsilon,1)\}$;\;
+       $T\leftarrow\mathbf{0}$;\;
+       $\mathrm{seen}\leftarrow\{s_0\}$
+\While{queue not empty}
+  \State $(s,\mathbf{b},w)\leftarrow\mathrm{queue.pop}()$
+  \State Run $\mathcal{A}(s)$ with tape $\mathbf{b}$, intercepting random calls
+  \If{execution completes with output $s'$}
+    \State $T[s\to s']\mathrel{+}=w$
+    \If{$s'\notin\mathrm{seen}$}
+      \State Add $s'$ to $\mathrm{seen}$;\; seed new BFS from $s'$
+    \EndIf
+  \Else{ (next bit $b_i$ needed)}
+    \State Push $(s,\mathbf{b}{\cdot}0,w_0)$ and $(s,\mathbf{b}{\cdot}1,w_1)$
+  \EndIf
+\EndWhile
+\State \Return $T$
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:bfs} constructs the symbolic transition matrix by
+breadth-first search.  Starting from a seed state $s_0$, the algorithm
+$\mathcal{A}$ is re-executed for each distinct binary prefix in the queue.
+When a random call is encountered, execution branches into two continuations
+(one per bit value), each pushed with its respective probability weight.
+When execution completes, the output state $s'$ and accumulated weight $w$
+contribute $T[s_0\to s']\mathrel{+}=w$.  Each newly discovered state
+becomes an additional seed.  The procedure simultaneously constructs the
+transition matrix and discovers the full connected component reachable from
+any seed.
+
+The BFS tree for a single state has depth equal to the maximum number of
+random bits consumed by any complete execution path.  For a Metropolis
+algorithm choosing among $n$ discrete options with Gaussian-displacement
+acceptance, this is typically $\lceil\log_2 n\rceil + O(1)$ bits per
+cluster step, giving a tree of size $\mathcal{O}(2^{\lceil\log_2 n\rceil})$
+per state.  The total cost grows as $\mathcal{O}(N^2\cdot 2^d)$ where $N$
+is the component size and $d$ is the maximum bit depth, so the method is
+practical only for small systems (typically $N\lesssim 1000$, $d\lesssim 20$).
+
+\subsection{Detailed balance verification}
+\label{sec:dbcheck}
+
+Given the symbolic transition matrix $T$ and energy function $E$, the checker
+evaluates
+\begin{equation}
+  \Delta_{ij} = T(i{\to}j)\,e^{-\beta E(i)} - T(j{\to}i)\,e^{-\beta E(j)}
+  \stackrel{?}{=} 0
+  \label{eq:check}
+\end{equation}
+for every ordered pair $(i,j)$.  Here $\beta$, all coupling functions
+$J(\cdot,\cdot,\cdot)$, field functions $f(\cdot,\cdot)$, and any other model
+parameters are free real symbols.  Each distinct call $J(a,b,d^2)$ or
+$f(x,y,L)$ is treated as an independent free real atom, so a PASS proves
+correctness for \emph{all} possible energy models, not merely a specific
+parametric form.
+
+Three efficiency steps are applied before any algebra.
+
+\medskip\noindent\textbf{Trivial-zero filter.}
+Pairs where both $T(i\to j)$ and $T(j\to i)$ are structurally zero (never
+connected by the algorithm) are skipped without any algebraic work.
+
+\medskip\noindent\textbf{Syntactic deduplication.}
+All remaining $\Delta_{ij}$ expressions are hashed before simplification.
+Each unique expression is simplified exactly once; structurally identical
+copies share the result.  For periodic lattices with translational symmetry,
+this alone reduces thousands of unique pairs to hundreds---e.g.,
+approximately $9\times$ for a $3\times 3$ torus.  With the additional
+canonical-ordering oracle (Section~\ref{sec:symmetry}), G-orbit pairs
+produce syntactically identical expressions, enabling a further
+$\sim\!|G|$-fold collapse.
+
+\medskip\noindent\textbf{FastChecker: polynomial coefficient test.}
+The primary simplification strategy exploits the algebraic structure of
+Metropolis acceptance.  After expanding a $\Delta_{ij}$ expression over sign
+cases of the coupling constants via \texttt{PiecewiseExpand}, each
+case reduces (within each feasible sign regime) to a sum of terms
+$c_k\,e^{-\beta L_k}$, where $c_k$ is a rational coefficient and $L_k$ is a
+polynomial in the coupling constants.  Detailed balance holds if and only if,
+for each distinct exponent polynomial $L_k$, the sum of its coefficients
+vanishes:
+\begin{equation}
+  \sum_{k:\,L_k = L} c_k = 0 \quad \forall L.
+  \label{eq:fast}
+\end{equation}
+This is verified by pure polynomial arithmetic in microseconds.
+
+Before applying the test, each Piecewise case must be checked for
+\emph{feasibility}---whether there exist real values of the coupling constants
+satisfying the case conditions.  The infeasible cases cannot contribute
+violations.  The feasibility check uses a two-path strategy: (1) a fast
+$\mathcal{O}(n)$ pattern-match identifies conditions consisting purely of
+\texttt{Unequal} atoms between distinct expressions, which are always
+satisfiable over the reals (each constraint is a co-dimension-1 surface;
+any finite conjunction of such surfaces has full Lebesgue measure);
+(2) for conditions not covered by the fast path, \texttt{FindInstance}
+locates a concrete example, which is typically $10$--$100\times$ faster than
+\texttt{Reduce} for polynomial-inequality conditions.
+
+\medskip\noindent\textbf{Implicit equality extraction (deepCheck).}
+For the rare case where the fast path is inconclusive after simplification,
+a second pass (\texttt{deepCheck=True}) is applied.
+\texttt{LogicalExpand} first expands any negated conjunctions in the
+Piecewise conditions (e.g., $\neg(A\wedge B)\to\neg A\vee\neg B$), exposing
+implicit equalities hidden inside negated conditions.
+\texttt{SubstEqualities} then substitutes these equalities into the residual
+expression; algebraic cancellation then confirms zero without further calls
+to \texttt{FullSimplify}.  This step was required to avoid a false positive
+in the VMMC algorithm at $3\times3$ grid size: without it, \texttt{FullSimplify}
+treated each Piecewise case independently and missed the implicit constraint
+$J_{231} = J_{232}$ implied by prior-case exclusion, erroneously reporting
+1296 spurious violations.
+
+\medskip\noindent\textbf{FullSimplify fallback.}
+Any expression for which the polynomial test and \texttt{deepCheck} are both
+inconclusive falls back to
+$\texttt{FullSimplify}[\texttt{PiecewiseExpand}[\Delta_{ij}], \{\beta>0,\ldots\}]$
+with sign assumptions on coupling constants.  This is always exact, at the
+cost of higher computational time (typically $0.3$--$5$\,s per expression).
+
+\subsection{Symmetry-aware checking}
+\label{sec:symmetry}
+
+For algorithms on periodic lattices whose energy and proposal are invariant
+under a lattice symmetry group $G$, the detailed-balance expressions
+$\Delta_{ij}$ and $\Delta_{i'j'}$ are equal whenever $(i',j')$ is a
+$G$-orbit image of $(i,j)$.  Checking one representative per orbit would
+suffice, giving an $|G|$-fold speedup.  For the square torus with full D4
+symmetry (8 rotations and reflections) combined with $(L\times L)$
+translations, $|G|=8L^2$, making the speedup significant for any lattice
+of practical size.
+
+The challenge is that $G$-orbit pairs reference different site indices and
+different neighbour-list orderings, producing syntactically distinct symbolic
+expressions even when mathematically equal.  The existing syntactic
+deduplication therefore does not automatically group them.  We solve this
+by making the BFS itself produce \emph{syntactically identical} expressions
+for $G$-orbit pairs.
+
+\medskip\noindent\textbf{Canonical-ordering oracle.}
+The seqBernoulli decomposition tree produced by the cluster-building routine
+is syntactically determined by the \emph{order} in which candidate neighbour
+sites are visited.  For $G$-invariant algorithms, the topological key
+\[
+  (d^2(p,q),\; d^2(p_\mathrm{post},q),\; d^2(p_\mathrm{rev},q),\; \text{type}(q))
+\]
+where $d^2$ denotes the minimum-image squared distance, is preserved by every
+$G$-isometry.  Sorting candidates by this key assigns the same canonical
+order to all $G$-orbit-related states.  The BFS then produces the same
+symbolic tree for every state in a $G$-orbit, making the resulting
+$\Delta_{ij}$ expressions syntactically identical and hash-equivalent.
+The existing syntactic deduplication then collapses the entire orbit to one
+representative evaluated once, at no additional verification cost.
+
+The canonical oracle is exposed through the standard interface function
+$\texttt{\$vmmcCandidates}$ defined in the shared geometry layer.  The
+checker substitutes the canonical implementation via Mathematica's
+\texttt{Block} during BFS: the algorithm requires no modification and
+remains unaware of the substitution:
+\begin{lstlisting}
+$bfsAlg = Function[s,
+  Block[{$vmmcCandidates = $dbcCanonicalCandidates},
+    $alg[s]]]
+\end{lstlisting}
+
+\medskip\noindent\textbf{G-invariance verification.}
+After BFS, a separate check verifies that the computed $T$ matrix is indeed
+$G$-invariant: $T(s\to s') = T(g(s)\to g(s'))$ for all generators $g$ and
+all state pairs.  The group $G = (\mathbb{Z}/L\mathbb{Z})^2\rtimes D_4$ on an
+$L\times L$ torus is generated by four elements: translate$(1,0)$,
+translate$(0,1)$, rotate$_{90}$, and reflect (main diagonal).  G-invariance
+under any product of generators follows by induction if it holds for all four;
+thus four sweeps over all state pairs suffice to certify invariance under all
+$|G|\leq 8L^2$ elements.  Each generator's action on all states is
+precomputed once into a hash table, making per-pair lookups $\mathcal{O}(1)$.
+The comparison is syntactic equality (valid because the canonical ordering
+makes $G$-related entries syntactically identical).
+
+If the $G$-invariance check fails---indicating the declared symmetry group
+is incorrect for this algorithm---the checker reports FAIL and the DB result
+is unaffected (it is always correct regardless of the symmetry declaration).
+If it passes, the user has both a formal proof of DB and a certificate of
+$G$-invariance.
+
+Table~\ref{tab:symmetry} summarises the safety guarantees.
+
+\begin{table}[t]
+  \centering
+  \caption{Safety guarantees for symmetry-aware checking.  The DB check
+    result is always correct.  G-invariance failure warns that the declared
+    symmetry is wrong; it does not produce false DB results.}
+  \label{tab:symmetry}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}p{3.0cm}cc@{}}
+    \toprule
+    Scenario & DB & G-inv \\
+    \midrule
+    Satisfies DB and $G$ & PASS & PASS \\
+    Violates DB & FAIL & PASS/FAIL \\
+    Satisfies DB but not $G$ & PASS & FAIL \\
+    Wrong $\$\mathrm{symmetryGroup}$ declaration & PASS & FAIL \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\medskip\noindent\textbf{Conditions for a valid symmetry declaration.}
+Three structural conditions must hold for the $G$-invariance declaration to
+be correct and the orbit reduction to give a valid speedup:
+(1) seed selection is uniform over occupied sites with no position-dependent
+weighting;
+(2) the displacement list contains every $(dx,dy)$ paired with $(-dx,-dy)$
+(proposal symmetry $P(\mathbf{d})=P(-\mathbf{d})$);
+(3) the energy uses only minimum-image periodic distances (no external field).
+If any condition fails, the $G$-invariance check will detect and report it.
+
+\subsection{Ergodicity checking}
+\label{sec:ergodicity}
+
+Detailed balance alone does not guarantee a correct sampler; the chain must
+also be ergodic (every state reachable from every other state).  The checker
+verifies ergodicity independently of detailed balance by comparing the number
+of states discovered in each BFS-connected component with the theoretical
+state count.  For $N$ labeled particles on $S$ sites (with at most one
+particle per site), the number of reachable configurations from any starting
+configuration under a swap-type move is the falling factorial $(S)_N =
+S(S-1)\cdots(S-N+1)$.  A component whose BFS-discovered state count equals
+$(S)_N$ is ergodic; a smaller count signals non-ergodicity.
+
+This check is implemented by the \texttt{ValidStateIDs} function in each
+algorithm file, which specifies the theoretical count for the given system
+size, and by comparing BFS-discovered state counts to this value.  A separate
+ergodicity check based on the support matrix $(I+S)^{n-1}$---which has a
+strictly positive $(i,j)$ entry if and only if state $j$ is reachable from
+$i$~\cite{HornJohnson1985}---is available for small components where
+matrix-power computation is feasible.
+
+Notably, detailed balance does not imply ergodicity and vice versa.  A
+non-ergodic algorithm can satisfy DB within each disconnected component while
+failing to reach all of state space; this is demonstrated explicitly in
+Section~\ref{sec:examples}.
+
+\subsection{Physical fidelity metrics}
+\label{sec:fidelity}
+
+Beyond the binary DB and ergodicity checks, the checker computes two optional
+scalar metrics measuring how closely the algorithm's transition matrix $T_\mathrm{MC}$
+matches a physical reference dynamics.  For a 2D periodic square lattice, the
+physical reference is Glauber single-particle dynamics~\cite{Glauber1963}.
+For each state pair $(i,j)$ differing by exactly one nearest-neighbour hop
+of a single particle:
+\begin{equation}
+  T_\mathrm{phys}(i\to j) = \frac{1}{N} \cdot \frac{1}{z}
+  \cdot \frac{1}{1+e^{\beta\Delta E}},
+  \label{eq:glauber}
+\end{equation}
+where $z=4$ is the 2D coordination number and $\Delta E = E(j)-E(i)$.
+All other entries of $T_\mathrm{phys}$ are zero (diagonal entries enforce
+row-sum normalisation).  $T_\mathrm{phys}$ is constructed exactly from the
+enumerated state space without simulation.
+
+\medskip\noindent\textbf{M1: relaxation spectrum ratio.}
+\begin{equation}
+  M_1 = \left|\frac{\lambda_2^\mathrm{MC}}{\lambda_3^\mathrm{MC}} -
+  \frac{\lambda_2^\mathrm{phys}}{\lambda_3^\mathrm{phys}}\right|
+  \label{eq:M1}
+\end{equation}
+where eigenvalues are sorted by real part (descending), $\lambda_1=1$ for any
+ergodic chain.  $M_1$ measures whether the algorithm reproduces the correct
+hierarchy of relaxation timescales.  $M_1=0$ indicates the ratio of the two
+slowest relaxation rates matches Glauber exactly; larger $M_1$ indicates a
+distorted timescale structure.
+
+\medskip\noindent\textbf{M2: row-normalised KL divergence (fidelity score).}
+\begin{equation}
+  M_2 = -\sum_i \pi_i \sum_j T_\mathrm{phys}(i\to j)\,
+  \log\frac{T_\mathrm{phys}(i\to j)}{T_\mathrm{MC}(i\to j)},
+  \label{eq:M2}
+\end{equation}
+the $\pi$-weighted average KL divergence of the physical transition
+distribution from the MC distribution, with the sign convention that $M_2=0$
+is a perfect match and $M_2<0$ indicates departure.  A value of $-\infty$
+(hard failure) indicates the algorithm cannot execute a transition that is
+physically required, $T_\mathrm{MC}(i\to j)=0$ for some $(i,j)$ with
+$T_\mathrm{phys}(i\to j)>0$.
+
+These metrics are not pass/fail criteria.  A more negative $M_2$ for a
+cluster algorithm such as VMMC is expected and reflects algorithmic
+acceleration: the algorithm decorrelates faster than physical Brownian
+dynamics by construction.  The metrics provide a quantitative basis for
+comparing the \emph{kinetic character} of different MC moves targeting the
+same equilibrium distribution.
+
+\subsection{Limitations}
+\label{sec:limitations}
+
+\medskip\noindent\textbf{Termination.}
+There is no guarantee that the BFS terminates for an arbitrary algorithm.
+Algorithms generating unbounded random sequences correspond to infinite binary
+trees; no automated procedure can decide termination in general (the halting
+problem~\cite{Turing1936}).  BFS branches are truncated at a user-specified
+maximum depth (default 20 bits); paths reaching this depth are silently
+excluded.  A warning is printed whenever truncation occurs; false negatives
+(missed violations) are possible in this regime.
+
+\medskip\noindent\textbf{Energy function.}
+The checker uses \texttt{energy[state]} exactly as written.  An incorrect
+energy function invalidates both the symbolic and numerical checks
+simultaneously.  Random calls inside the energy function are detected and
+flagged, but other incorrectness (wrong formula, wrong sign) is invisible to
+the framework.
+
+\medskip\noindent\textbf{Hidden state.}
+If the algorithm uses mutable global state, system time, or external calls
+that are not intercepted, the recorded execution paths may not match actual
+execution.  \texttt{CheckAlgorithmSafety} detects known unsafe call patterns
+but cannot detect custom C extensions or arbitrary I/O.
+
+Table~\ref{tab:failmodes} summarises the known false-negative and
+false-positive risks.
+
+\begin{table}[t]
+  \centering
+  \caption{Known failure modes.  False negatives are cases where a broken
+    algorithm passes; false positives are cases where a correct algorithm
+    fails.  Most risks are mitigated by design choices or warnings.}
+  \label{tab:failmodes}
+  \small
+  \setlength{\tabcolsep}{2.5pt}
+  \begin{tabular}{@{}p{2.2cm}p{3.1cm}p{2.2cm}@{}}
+    \toprule
+    Source & Description & Mitigation \\
+    \midrule
+    \multicolumn{3}{@{}l}{\textit{False negatives}} \\[2pt]
+    MaxBitDepth & Paths $>20$ bits excluded & Increase option; WARNING \\
+    TimeLimit & BFS exits after 120\,s/state & WARNING printed \\
+    MaxComponents & Only first $N$ components checked & Set appropriately \\
+    Hidden state & Mutable globals contaminate paths & Stateless design \\
+    \midrule
+    \multicolumn{3}{@{}l}{\textit{False positives}} \\[2pt]
+    FullSimplify incomplete & Rare; deepCheck catches most & Two-pass strategy \\
+    Unlisted params & Numeric value reduces check to single point & List all in \texttt{\$checkerAbs\-tractParams} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Computational Implementation}
+\label{sec:mma}
+
+\subsection{Mathematica as the host language}
+\label{sec:why-mma}
+
+The framework's central requirement is that every call to the random-number
+generator can be silently intercepted and replaced by a symbolic token,
+without the algorithm under test being modified or even aware of the
+substitution.  Mathematica satisfies this via \texttt{Block[\{f=g,\ldots\},\,expr]},
+which dynamically rebinds any named function for the duration of a lexical
+scope.  Regardless of how deeply a call to \texttt{RandomReal[]} is buried
+inside utility functions or conditional branches, \texttt{Block} intercepts
+it transparently; the algorithm requires no cooperation.  No other mainstream
+language provides this mechanism for arbitrary runtime call trees without
+source modification.
+
+The second essential feature is Mathematica's \emph{UpValue} system, which
+allows comparison operators ($<$, $\leq$, \ldots) to be overloaded on the
+interval-tracking token \emph{within the CAS evaluator itself}: the
+expression \texttt{RandomReal[]~<~MetropolisProb[dE]} dispatches to
+the symbolic token handler via UpValue without any special syntax in the
+algorithm.  Together, \texttt{Block} and UpValues make the interception layer
+completely invisible to the algorithm author, eliminating the most dangerous
+class of false negatives: those where a random call escapes symbolic tracking
+and returns a concrete floating-point number that superficially resembles a
+valid symbolic weight.
+
+For the algebraic verification step, Mathematica's \texttt{PiecewiseExpand}
+reduces products of \texttt{Piecewise} functions to a flat list of cases by
+computing the Cartesian product of all condition branches automatically.
+\texttt{Reduce[$\mathit{cond}\wedge\beta>0$, params, Reals]}
+provides a complete decision procedure for linear real arithmetic over
+coupling constants.  When these are exhausted, \texttt{FullSimplify} applies
+a search over hundreds of algebraic transformation rules, handling mixed
+exponential-\texttt{Piecewise} expressions that arise in complex algorithms
+such as VMMC with abstract coupling fields.
+
+\medskip\noindent\textbf{Alternative implementations.}
+The strongest open-source alternative is Julia combined with
+Symbolics.jl~\cite{Gowda2021}.  The Cassette.jl overdubbing
+framework~\cite{Cassette} provides a runtime interception mechanism close to
+Mathematica's \texttt{Block}: a context can transparently redirect calls to
+\texttt{rand()} anywhere in a Julia call tree to a user-defined symbolic
+substitute.  A Julia implementation would remove the proprietary-software
+dependency while preserving most robustness advantages.  Python with
+SymPy~\cite{Meurer2017} is the weakest option: it lacks a runtime overdubbing
+mechanism, SymPy's \texttt{piecewise\_fold} does not perform cross-product
+expansion, and \texttt{ask} is incomplete for multivariate linear
+inequalities.
+
+\subsection{Computational cost and parallelisation}
+\label{sec:parallel}
+
+The two main computational bottlenecks are the BFS itself and the
+\texttt{FullSimplify} calls.
+
+\medskip\noindent\textbf{Parallel BFS.}
+\texttt{BuildTreeAT} uses level-synchronous parallel BFS: the entire current
+wave frontier is sent to \texttt{ParallelMap} in one call, partitioned into
+at most $n_K$ chunks (one per available kernel).  This gives at most one
+round-trip overhead per BFS wave, amortised across all states in the wave.
+Single-state waves revert to sequential evaluation automatically.  On a
+4-core machine, this yields a $3.3\times$ speedup for the 504-state
+\texttt{vmmc\_continuous.wl} component at \texttt{NGrid=3}: sequential BFS
+time 96.3\,s reduced to 28.9\,s.
+
+\medskip\noindent\textbf{Parallel FullSimplify.}
+When the fast check is inconclusive for many unique expressions, the fallback
+\texttt{FullSimplify} is also parallelised.  All unique expressions requiring
+\texttt{FullSimplify} are collected after syntactic deduplication and
+distributed across available subkernels in one \texttt{ParallelMap} call.
+The subsequent violation scan performs only fast Association lookups.  For
+\texttt{vmmc\_continuous.wl} at \texttt{NGrid=3}: total check time reduced
+from 29\,min to 12.5\,min on 4 kernels.
+
+\medskip\noindent\textbf{Symmetry-aware cost savings.}
+The canonical-ordering oracle and hash deduplication together achieve
+near-$|G|$-fold compression.  For a two-particle component on the $3\times3$
+torus (72 states, $|G|=72$ under D4+translations), the $288$ non-trivial
+$(i,j)$ pairs collapse to $2$ unique expressions: 99\% of all \texttt{FullSimplify}
+evaluations are eliminated.  The G-invariance check over the full 504-state
+component takes $4.3$\,s on 4 kernels.  For reference, Table~\ref{tab:symtimes}
+shows estimated runtimes at \texttt{NGrid=3} under different symmetry
+exploitation levels (estimated from measured data).
+
+\begin{table}[t]
+  \centering
+  \caption{Estimated runtimes for the \texttt{vmmc\_lattice.wl} 504-state
+    component at \texttt{NGrid=3} on 4 kernels, as a function of symmetry
+    exploitation.  FS = FullSimplify calls; estimates scale linearly from
+    measured 12.5\,min at no-symmetry.}
+  \label{tab:symtimes}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    Mode & Pairs & FS calls & Est.\ time \\
+    \midrule
+    No symmetry         & 126,756 & $\sim$300 & $\sim$12\,min \\
+    Translations ($|G|=9$) & 14,084 & $\sim$33 & $\sim$1.4\,min \\
+    D4+trans.\ ($|G|=72$) & $\approx$1,760 & $\sim$4 & $\sim$10\,s \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{User interface and algorithm files}
+\label{sec:interface}
+
+Users supply a \texttt{.wl} algorithm file defining four items: the energy
+function \texttt{energy[state]}, the MC move \texttt{Algorithm[state]}, the
+BitsToState decoder \texttt{BitsToState[bits]}, and a numeric inverse
+temperature \texttt{numBeta} for the numerical check.  Optional definitions
+control symmetry declarations, abstract parameter handling, and display
+formatting.
+
+\medskip\noindent\textbf{Abstract parameters.}
+Physical parameters (e.g., \texttt{physLen}, \texttt{epsLJ}) that must be
+unbound symbols during BFS are declared as string names in
+\texttt{\$checkerAbstractParams}.  The checker saves their concrete values,
+clears the symbols, runs BFS, then restores values for the numerical MCMC
+check.  String names are required because a list of symbol references would
+evaluate to their current numeric values before the checker intercepts them.
+
+\medskip\noindent\textbf{Abstract coupling functions.}
+When a coupling function \texttt{couplingJ} should have no concrete
+definition during BFS (each call treated as a free real atom), a concrete
+implementation \texttt{\$pairEnergy} is provided separately.  The checker
+injects it via \texttt{Block[\{couplingJ\},~couplingJ~:=~\$pairEnergy]}
+for numerical runs.
+
+The checker is invoked as:
+\begin{lstlisting}
+wolframscript -file check.wls algo.wl \
+  NGrid=N MaxComponents=N Mode=Symbolic
+\end{lstlisting}
+with options controlling grid size, component limits, bit depth, symmetry
+exploitation, and parallelisation.  A report script (\texttt{report.wls})
+provides detailed output for a single seed state, including the full decision
+tree and symbolic transition matrix.
+
+% ============================================================
+\section{Results}
+\label{sec:examples}
+
+\subsection{1D Kawasaki dynamics on a ring}
+\label{sec:kawasaki}
+
+The 1D Kawasaki algorithm~\cite{Kawasaki1966} operates on a periodic ring of
+$L$ sites.  Each site holds a vacancy (type 0) or one of $N_t$ particle
+types.  At each step, two adjacent sites are chosen uniformly at random and
+their contents swapped with Metropolis probability $\Mf{-\beta\Delta E}$,
+where the energy is the nearest-neighbour sum
+\begin{equation}
+  E(\mathbf{s}) = \sum_{i=1}^{L} J\!\left(s_i,\, s_{i\bmod L+1},\, 1\right),
+  \label{eq:kawenergy}
+\end{equation}
+with $J(a,b,d^2)$ a coupling function treated as a free symbol for each
+distinct type pair.
+
+For a 4-site ring with one particle of type 1 and one of type 2, the checker
+discovers 12 states, which fall into two energy classes: 8 states with the
+particles adjacent (energy $J_{12}$) and 4 with them separated (energy $0$).
+Table~\ref{tab:kawmat} shows representative transition matrix entries.  The
+detailed-balance condition for the pair
+(\lsite{0}\lsite{0}\lsite{1}\lsite{2},\;\lsite{0}\lsite{1}\lsite{0}\lsite{2})
+evaluates to
+\begin{equation}
+  \tfrac{1}{4}\Mf{\beta J_{12}}\cdot e^{-\beta J_{12}} \;=\;
+  \tfrac{1}{4}\Mf{-\beta J_{12}}\cdot 1,
+\end{equation}
+which holds for all $J_{12}$: if $J_{12}>0$, both sides equal
+$\tfrac{1}{4}e^{-\beta J_{12}}$; if $J_{12}<0$, both equal $\tfrac{1}{4}$.
+All 132 non-trivial $\Delta_{ij}$ simplify to zero and the checker reports
+PASS.
+
+\begin{table}[t]
+  \centering
+  \caption{Representative symbolic transition matrix entries for the 4-site
+    1D Kawasaki ring ($L{=}4$, particles of types 1 and 2).
+    States shown as periodic lattice rows \lsite{\cdot}\lsite{\cdot}\lsite{\cdot}\lsite{\cdot}.
+    All non-zero off-diagonal entries follow the same pattern.}
+  \label{tab:kawmat}
+  \setlength{\tabcolsep}{2pt}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{@{}llr@{}}
+    \toprule
+    Transition ($i\to j$) & Description & $T(i\to j)$ \\
+    \midrule
+    \multicolumn{3}{@{}l}{\textit{From adjacent pair ($E = J_{12}$)}} \\[1pt]
+    \lsite{0}\lsite{0}\lsite{1}\lsite{2}$\to$\lsite{0}\lsite{0}\lsite{2}\lsite{1}
+      & swap types; $\Delta E=0$
+      & $\tfrac{1}{4}$ \\[2pt]
+    \lsite{0}\lsite{0}\lsite{1}\lsite{2}$\to$\lsite{0}\lsite{1}\lsite{0}\lsite{2}
+      & separate; $\Delta E=-J_{12}$
+      & $\tfrac{1}{4}\Mf{\beta J_{12}}$ \\[2pt]
+    \lsite{0}\lsite{0}\lsite{1}\lsite{2}$\to$\lsite{2}\lsite{0}\lsite{1}\lsite{0}
+      & separate (wrap); $\Delta E=-J_{12}$
+      & $\tfrac{1}{4}\Mf{\beta J_{12}}$ \\[4pt]
+    \multicolumn{3}{@{}l}{\textit{From separated pair ($E = 0$)}} \\[1pt]
+    \lsite{0}\lsite{1}\lsite{0}\lsite{2}$\to$\lsite{0}\lsite{0}\lsite{1}\lsite{2}
+      & bring adjacent; $\Delta E=+J_{12}$
+      & $\tfrac{1}{4}\Mf{-\beta J_{12}}$ \\[2pt]
+    \lsite{0}\lsite{1}\lsite{0}\lsite{2}$\to$\lsite{0}\lsite{1}\lsite{0}\lsite{2}
+      & self (failed proposals)
+      & $1-\Mf{-\beta J_{12}}$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\subsection{Rightward-only cluster: a false negative in numerical testing}
+\label{sec:cluster}
+
+We demonstrate the diagnostic power of symbolic checking over numerical
+testing using a one-dimensional cluster algorithm that always violates
+detailed balance yet passes every statistical test.
+
+The algorithm identifies all maximal connected clusters of particles on the
+ring.  One cluster is chosen at random.  If the site immediately clockwise of
+the cluster is vacant, the entire cluster is slid one step clockwise and
+accepted with Metropolis probability $\Mf{-\beta\Delta E}$.  No leftward
+slide is ever proposed.
+
+For any transition $i\to j$ caused by a rightward slide, $T(j\to i)=0$
+because the reverse leftward move is never proposed.  Thus
+$\Delta_{ij} = T(i\to j)\,e^{-\beta E(i)}\neq 0$ for all $J_{ab}$ and
+$\beta$.  The symbolic checker detects this immediately.
+
+Crucially, however, the algorithm visits states in a directed cycle under
+rigid cluster translation.  Because sliding a cluster rigidly preserves all
+internal bonds and simply relabels the boundary bond, every state in the
+cycle has the same energy.  The Boltzmann distribution over the cycle is
+therefore uniform, and any numerical test comparing the empirical histogram
+to the Boltzmann distribution finds perfect agreement.
+
+Table~\ref{tab:cluster} shows checker output (Mode=Both) for several seed
+states.  States where all sites are occupied form single-state trivially
+balanced components.  For all multi-state components, the symbolic checker
+finds violations while the numerical KL divergence is consistent with zero
+and the numerical check reports PASS.
+
+\begin{table}[t]
+  \centering
+  \caption{Checker output (Mode=Both) for the rightward-only 1D cluster
+    algorithm.  \#St: component size.  Sym: symbolic result.  \#F: violated
+    ordered pairs.  KL: Kullback--Leibler divergence from Boltzmann (100\,000
+    steps).  Dash: single-state component.}
+  \label{tab:cluster}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{@{}lllrlll@{}}
+    \toprule
+    Bits & State & \#St & Sym. & \#F & KL & Num. \\
+    \midrule
+    \texttt{10}      & $\{1\}$       & 1 & PASS         & 0 & $-$  & $-$  \\
+    \texttt{100}     & $\{1,0\}$     & 2 & PASS         & 0 & ${\sim}0$ & PASS \\
+    \texttt{110}     & $\{1,2\}$     & 1 & PASS         & 0 & $-$  & $-$  \\
+    \texttt{1001}    & $\{1,0,0\}$   & 3 & \textbf{FAIL}& 3 & ${\sim}0$ & PASS \\
+    \texttt{1100}    & $\{1,2,0\}$   & 3 & \textbf{FAIL}& 3 & ${\sim}0$ & PASS \\
+    \texttt{11001}   & $\{1,0,0,0\}$ & 4 & \textbf{FAIL}& 4 & ${\sim}0$ & PASS \\
+    \texttt{11101}   & $\{1,2,0,0\}$ & 4 & \textbf{FAIL}& 4 & ${\sim}0$ & PASS \\
+    \texttt{101001}  & $\{1,2,3,0\}$ & 4 & \textbf{FAIL}& 4 & ${\sim}0$ & PASS \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+This example illustrates a broad class of latent bugs: an algorithm whose
+stationary distribution is exactly Boltzmann under translation-invariant
+energies, yet which violates detailed balance and would sample incorrectly
+for any position-dependent energy (e.g., an external field).  No numerical
+test at the symmetric energy can detect the failure; the symbolic check
+catches it unconditionally, for all parameter values, without running any
+Markov chain.
+
+\subsection{2D Virtual Move Monte Carlo}
+\label{sec:vmmc}
+
+VMMC~\cite{Whitelam2007} is a cluster algorithm for particles on a 2D
+periodic lattice.  A seed particle is chosen uniformly at random, a virtual
+rigid displacement in a randomly chosen direction is proposed, and a cluster
+is grown by recursively testing each occupied neighbour with forward and
+reverse link probabilities
+\begin{equation}
+  p_\mathrm{fwd}(i,j) = \max\!\bigl(0,\,1-e^{\beta(\varepsilon_\mathrm{init}-\varepsilon_\mathrm{fwd})}\bigr),
+\label{eq:plink}
+\end{equation}
+and analogously $p_\mathrm{rev}$.  A frustrated reverse link aborts the
+move; otherwise the cluster translates rigidly.  This enforces detailed
+balance without a Metropolis acceptance step~\cite{Whitelam2007}.
+
+\smallskip\noindent\textbf{Correct VMMC.}
+On a $2\times2$ torus with 2 distinct particles (12 states), the checker
+verifies all 132 non-trivial $\Delta_{ij}$ and reports PASS.  A
+representative entry is
+\begin{equation}
+  T\!\bigl(\{0,0,1,2\}\to\{1,2,0,0\}\bigr) = \tfrac12\bigl(1-(1-p_{12})^2\bigr),
+\end{equation}
+where $p_{12}=\max(0,1-e^{-\beta J_{12}})$, reflecting the two cluster
+orientations through which this transition can be assembled.
+
+\smallskip\noindent\textbf{Missing-direction variant.}
+An intentionally broken variant omits the ``up'' direction.  On a $2\times2$
+torus, periodic boundary conditions render up and down equivalent, so the
+asymmetry is invisible and the checker correctly reports PASS.  On a
+$3\times3$ torus, seeding with a two-particle state, the checker finds 144
+violated pairs---the broken directional symmetry is unambiguously exposed.
+
+\smallskip\noindent\textbf{Biased-displacement variant.}
+\texttt{vmmc\_biased.wl} duplicates rightward displacements so that
+$P(dx>0,dy)=2\cdot P(dx<0,dy)$.  This breaks DB (correctly caught: FAIL)
+and also breaks $G$-invariance under D4 (the G-invariance check reports FAIL
+for the rotate$_{90}$ generator, since a $90^\circ$ rotation maps the
+over-represented rightward moves to unbiased upward moves).
+
+\smallskip\noindent\textbf{Abstract field and coupling.}
+A further variant leaves both $J(a,b,d^2)$ and an external field function
+$f(x,y,L)$ completely unevaluated during the symbolic check.  Every call is
+treated as an independent free real atom.  A PASS proves correctness for all
+possible energy models simultaneously.  On a $2\times2$ grid with 3 distinct
+particles (24 states), the checker reports PASS under these fully abstract
+conditions.
+
+\subsection{Symmetry-aware checking at NGrid=3}
+\label{sec:sym-example}
+
+\texttt{vmmc\_lattice.wl} replaces the rounded-Gaussian displacement of
+\texttt{vmmc\_continuous.wl} with a uniform box
+$\{(dx,dy): |dx|\leq n_\mathrm{step}, |dy|\leq n_\mathrm{step}\}\setminus\{(0,0)\}$.
+This ensures $P(\mathbf{d})=P(-\mathbf{d})$ structurally and makes
+all seqBernoulli weights rational constants, eliminating \texttt{erf}
+functions and making the FastChecker complete (no false-positive risk from
+transcendental feasibility conditions).  The algorithm declares
+$\texttt{\$symmetryGroup} = \{\texttt{"translation"}, \texttt{"D4"}\}$.
+
+At \texttt{NGrid=3} (\texttt{MaxComponents=4}, 4 kernels):
+\begin{itemize}
+  \item The two-particle component (72 states) produces 288 non-trivial
+  $(i,j)$ pairs, which collapse via hash deduplication to \textbf{2 unique
+  expressions} (99\% collapse rate).
+  \item The G-invariance check over the 504-state component takes 4.3\,s.
+  \item Total wall time for all checked components: $\approx 2$\,min\,55\,s.
+\end{itemize}
+The checker reports DB: PASS, Ergodicity: PASS (state count matches
+$(S)_N$ for every component), G-invariance: PASS.
+
+\smallskip\noindent\textbf{Ergodicity failure example.}
+\texttt{kawasaki\_1d\_nonergodic.wl} demonstrates the independence of the
+two checks.  Only particles of type 1 participate in swaps; particles of
+types 2 and higher are frozen.  The checker reports: DB PASS (within each
+invariant subspace the swap dynamics are correctly balanced), Ergodicity
+FAIL (state count smaller than $(S)_N$ because frozen particles cannot
+rearrange).  Detailed balance cannot detect non-ergodicity; both checks are
+required for a valid sampler.
+
+% ============================================================
+\section{Intended Use Cases}
+\label{sec:usecases}
+
+\DBC{} is designed for algorithm developers and simulation practitioners in
+statistical physics, soft matter, and computational chemistry.  Below we
+describe the principal intended use cases and their scope.
+
+\subsection{Verification and regression testing}
+\label{sec:uc-regression}
+
+The most immediate use is as a regression test for existing MC algorithms.
+A single invocation of \texttt{check.wls} over the smallest non-trivial
+system sizes (typically $2\times2$ or $3\times3$ for 2D algorithms) provides
+a formal proof of correctness for all parameter values simultaneously.  This
+surpasses statistical testing for two reasons: (i) a PASS is a theorem, not
+a statistical outcome, and (ii) the proof covers the full parameter space,
+including parameter regimes---e.g., near a phase transition, or with unusual
+coupling ratios---where numerical tests would require a dedicated targeted
+run.
+
+The tool catches bugs that are invisible to numerical tests.  The rightward
+cluster example (Section~\ref{sec:cluster}) is one class; others include:
+asymmetric proposal distributions that happen to cancel at specific
+temperatures; missing reverse moves that only matter in the presence of an
+external field; energy function sign errors that are compensated by an
+incorrect acceptance rule.
+
+As a regression tool, the checker can be integrated into a continuous
+integration pipeline: on any modification of the algorithm file, a fast
+symbolic check (\texttt{Mode=Symbolic, MaxBitString=11111}) runs in under
+two minutes and reports any newly introduced violations before code is merged.
+
+\subsection{Algorithm development: design, certify, translate}
+\label{sec:uc-design}
+
+For new algorithm development, the natural workflow is to design and certify
+in the Mathematica environment before translating to a production language.
+The algorithm is implemented as a \texttt{.wl} file; the checker provides
+formal verification on small systems.  Once a PASS is obtained, the algorithm
+is translated to C++, Python, Julia, or Fortran for production use.
+
+This workflow addresses a known challenge in simulation algorithm design:
+detailed-balance proofs for complex cluster algorithms require careful
+tracking of many forward and reverse path weights, and are susceptible to
+subtle sign errors and missed edge cases.  The checker replaces this manual
+book-keeping with an automated algebraic verification.
+
+The \texttt{report.wls} script provides additional diagnostic support: for a
+single seed state it prints the full BFS decision tree, the symbolic
+transition matrix, and identifies all violated pairs.  This allows the
+developer to understand exactly which paths contribute to each transition
+probability and why the balance condition fails, guiding targeted correction.
+
+Translation of a certified algorithm to a production language introduces a
+gap: the checker proves the Mathematica implementation satisfies detailed
+balance, not the C++/Python translation.  Two strategies mitigate this.
+First, for simple algorithms (single-particle Metropolis, standard Kawasaki),
+the subset of Mathematica used---integer arithmetic, array indexing,
+conditional branches---maps mechanically to any language, and the translation
+can be validated by running both on identical random seeds.  Second, for
+complex algorithms, the Mathematica implementation serves as a reference: a
+test suite comparing the two implementations on a comprehensive set of states
+and random seeds establishes the translation's fidelity with high but not
+absolute confidence.
+
+\subsection{LLM-assisted algorithm discovery}
+\label{sec:uc-llm}
+
+A prospective use case is as the correctness oracle in a large language model
+(LLM) algorithm discovery loop~\cite{FunSearch2023,AlphaEvolve2025}.  The
+proposed architecture is as follows:
+(1) an LLM generates a candidate MC algorithm as a Mathematica file;
+(2) the checker runs symbolically and returns a binary PASS/FAIL;
+(3) on FAIL, the exact symbolic expression $\Delta_{ij} = T(i\to j)\pi(i) -
+T(j\to i)\pi(j)\neq 0$ for the violating state pair is fed back verbatim to
+the LLM;
+(4) the LLM revises the algorithm and the loop repeats.
+
+The symbolic counterexample provides qualitatively richer feedback than
+any runtime error message.  A Python traceback says ``your code crashed at
+line 12''; the checker says ``the detailed-balance condition fails for states
+$(3,7)$ because the expression $e^{\beta J_{12}} - e^{\beta J_{13}}$ is
+nonzero''.  This is a mathematical statement about the structure of the
+algorithm---identifying which part of the growth rule generated the $J_{12}$
+term and which generated the $J_{13}$ term---that the LLM can reason about
+algebraically to guide targeted correction.  This constitutes a qualitatively
+richer feedback mode than standard execution loops in the LLM
+literature~\cite{PAL2023,ReAct2023,Reflexion2023,LLMLOOP2025}, since the
+oracle speaks in the same algebraic language as the problem domain rather
+than simply reporting execution success or failure.
+
+\medskip\noindent\textbf{Scope and limitations of this use case.}
+This use case is prospective; no such discovery loop has yet been
+implemented.  Several limitations must be noted.  Detailed balance is
+\emph{sufficient} but not necessary for a Boltzmann stationary distribution:
+algorithms that satisfy only global balance, such as
+ECMC~\cite{Bernard2009}, would correctly fail the checker and be excluded
+from consideration.  Detailed balance says nothing about ergodicity (which
+must be checked separately) or about kinetic fidelity (whether the algorithm
+approximates physical dynamics).  These are independent necessary conditions
+for a physically useful algorithm.
+
+More subtly, the search space for new algorithms is vast and largely
+unstructured.  Unconstrained LLM generation is likely to produce many
+syntactically valid but physically incoherent or non-ergodic algorithms.
+The most productive approach is constrained search: give the LLM a physically
+motivated algorithmic skeleton with a specific modifiable component, and ask
+it to fill in that component.  Template-guided generation, combined with the
+formal checker as a hard correctness constraint, mirrors the approach of
+FunSearch~\cite{FunSearch2023} but with a formal mathematical oracle rather
+than an empirical evaluator---a qualitative upgrade in the nature of the
+correctness guarantee.
+
+The physical kinetics target must also be operationalised.  Detailed
+balance is a necessary condition for correct equilibrium sampling; it
+says nothing about whether the algorithm reproduces physically relevant
+dynamics (e.g., the correct relaxation timescale hierarchy or mean-squared
+displacement scaling).  The physical fidelity metrics of
+Section~\ref{sec:fidelity} provide a continuous scalar signal for this, but
+a precise kinetic target must be specified before the loop can be used to
+optimise for it.
+
+\subsection{Physical kinetics characterisation}
+\label{sec:uc-kinetics}
+
+The physical fidelity metrics M1 and M2 (Section~\ref{sec:fidelity}) enable
+quantitative comparison of the kinetic character of different MC algorithms
+targeting the same equilibrium distribution.  This is useful in two
+settings.
+
+First, when choosing among multiple correct (DB-passing) algorithms for a
+given model, M2 ranks their kinetic fidelity against Glauber reference
+dynamics and M1 compares their relaxation timescale structure.  An algorithm
+with a more negative M2 accepts a kinetic departure from Brownian dynamics in
+exchange for faster decorrelation---a deliberate algorithmic acceleration.
+
+Second, when the goal is to match the kinetics of a physical process as
+closely as possible (e.g., for time-resolved comparisons with experiment or
+with molecular dynamics), M2 and M1 provide a quantitative measure of how
+well the MC transition matrix approximates the physical one on small tractable
+systems.  These metrics are computed numerically at specific parameter values;
+they do not constitute a formal proof of kinetic fidelity for all parameters.
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\medskip\noindent\textbf{Scope and system size.}
+The exponential cost of BFS---$\mathcal{O}(N^2\cdot 2^d)$ in the number of
+states $N$ and bit depth $d$---limits practical use to system sizes of roughly
+$\lesssim\!10$ sites per dimension on current hardware.  This is smaller than
+production simulation systems by several orders of magnitude.  However,
+detailed-balance violations are a property of the algorithm, not the system
+size: an algorithm that fails DB on a $2\times2$ lattice fails it on a
+$200\times200$ lattice as well.  Small systems are the correct setting for
+formal verification; large systems are the correct setting for production
+simulation.  The workflow ``certify on small, simulate on large'' is
+analogous to formal verification of small kernel functions before deploying
+at scale.
+
+\medskip\noindent\textbf{What the checker does and does not prove.}
+A PASS from the symbolic checker proves, under the assumptions listed in
+Section~\ref{sec:limitations}, that the Mathematica implementation of the
+algorithm satisfies detailed balance for all model parameter values, on the
+specific system sizes tested.  It does not prove ergodicity (checked
+separately), kinetic fidelity (assessed via the M1/M2 metrics), or that a
+translation of the algorithm to a production language preserves correctness.
+It also does not verify correctness for all possible system sizes, only those
+tested; in practice, the small system sizes that the checker can handle are
+sufficient to expose all structural detailed-balance violations, since these
+arise from the algorithm's move logic rather than from finite-size effects.
+
+\medskip\noindent\textbf{Portability.}
+Production MC simulations are written in C++, Fortran, Python, or Julia.
+The most defensible architecture for existing codebases is a two-level
+design: the production simulation runs in the native language; a reference
+Mathematica implementation of the MC move is maintained alongside and
+periodically tested against the production code on a comprehensive set of
+states and random seeds; and the symbolic checker is applied to the reference
+implementation.  For new algorithm development the natural workflow is the
+reverse: design and certify in Mathematica, then translate once correctness
+is established.
+
+The clean architecture of the \texttt{.wl} algorithm files---a small,
+bounded interface of four required definitions with no arbitrary I/O or
+polymorphic data structures---is also compatible with a minimal domain-specific
+language (DSL) approach: a single algorithm description with two
+interpreters, one producing the Mathematica checker input and one producing
+production C++ or Python.  Because the DSL is restricted, the two
+interpreters can be verified semantically equivalent by inspection, and a
+PASS constitutes a proof valid for the production code as well.  This is the
+strongest possible guarantee and the most natural design for new algorithm
+development.
+
+\medskip\noindent\textbf{Comparison with model checking.}
+Formal model checkers such as PRISM and Storm could in principle verify
+temporal-logic properties of a Markov chain's transition matrix.  However,
+they require the user to construct the chain's model by hand in a dedicated
+language---effectively reproducing the case analysis of an analytic proof.
+The present framework operates directly on the algorithm as executable code,
+with no model-translation step, and targets the detailed-balance condition
+directly as a pairwise algebraic identity.  This combination---executable
+input, exact algebraic output, all parameter values simultaneously---is not
+provided by any existing formal method for Markov chains.
+
+% ============================================================
+\section{Conclusions}
+\label{sec:conclusion}
+
+We have presented \DBC{}, an automated framework for the exact symbolic
+verification of detailed balance in Monte Carlo algorithms.  By intercepting
+all random calls and replacing them with reads from a binary tape, the
+framework constructs a complete symbolic transition matrix by BFS and checks
+the detailed-balance condition algebraically.  Coupling constants, field
+functions, and inverse temperature are treated as free symbols throughout,
+so a PASS constitutes a mathematical proof valid for all parameter values
+simultaneously; a FAIL yields exact symbolic expressions identifying which
+transitions violate balance.  Ergodicity is checked independently as a
+complement.
+
+The rightward-only cluster algorithm provides a striking illustration of the
+method's diagnostic value: it visits every state in the correct proportion
+under translation-invariant energies and passes all numerical statistical
+tests, yet violates detailed balance because the reverse move is never
+proposed.  No histogram-based test can detect this; the symbolic checker
+catches it immediately.  The example illustrates a class of bugs latent in
+algorithms for translation-invariant energies but manifest under any
+position-dependent field---precisely the case not tested in symmetric systems.
+
+Symmetry-aware checking extends the method's practical reach.  By making the
+BFS produce syntactically identical expressions for $G$-orbit state pairs and
+verifying $G$-invariance post-hoc using generator sweeps, we achieve near
+$|G|$-fold compression of the verification cost while maintaining correctness
+guarantees.  On a $3\times3$ lattice with D4+translation symmetry, this
+compresses a two-particle component from 288 state pairs to 2 unique
+expressions, reducing the dominant FullSimplify cost from minutes to seconds.
+
+The primary limitation is the exponential BFS cost, restricting practical
+verification to $\lesssim\!10$ sites per dimension.  This is sufficient to
+certify structural correctness of the algorithm---detailed-balance violations
+arise from algorithm logic, not from system size---but leaves open questions
+about large-system ergodicity and kinetic properties.  Extensions under
+consideration include a DSL approach for direct verified translation to
+production code, and use of the checker as the formal oracle in an LLM-driven
+algorithm discovery loop, where the symbolic counterexample can guide targeted
+revisions in a way that runtime error feedback cannot.
+
+% ============================================================
+\appendix
+
+\section{BitsToState: bijective state enumeration}
+\label{app:bitstostate}
+
+The reference implementation uses a bijective map between non-negative
+integers and labeled-particle arrays.  An integer $\mathrm{ID}$ encodes, in
+order: (i) the array length $L$, via a prefix count
+$\sum_{l<L}|\mathcal{S}_l|$ where $|\mathcal{S}_l|$ is the total number of
+labeled arrays of length $l$; (ii) the particle number $N$, via a secondary
+prefix; (iii) the sorted positions of the $N$ particles, ranked by the
+combinatorial number system; (iv) the assignment of types to positions,
+ranked by the factorial number system.  Each step has an explicit inverse.
+
+The function $\textsc{BitsToState}$ interprets a bit string as the binary
+representation $\mathrm{ID}=\sum_i b_i\cdot 2^{|\mathbf{b}|-i}$ and calls
+the decoder.  States are enumerated in strictly increasing order of
+complexity; algorithm files may supply a \texttt{ValidStateIDs} filter that
+returns null for configurations not satisfying global constraints (e.g.,
+perfect-square lattice size for 2D systems), causing the checker to skip
+those strings without any BFS work.
+
+\section{Supported random call types}
+\label{app:random}
+
+\begin{table}[H]
+  \centering
+  \caption{Random call types supported by the checker and their
+    reduction to the binary tape.}
+  \label{tab:random}
+  \small
+  \setlength{\tabcolsep}{3pt}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    Call & Reduction \\
+    \midrule
+    \texttt{RandomReal[]} & Interval-tracking token \\
+    \texttt{RandomInteger[\{lo,hi\}]} & Rejection sampling, $\lceil\log_2(h{-}l{+}1)\rceil$ bits \\
+    \texttt{RandomChoice[list]} & Rejection sampling over elements \\
+    \texttt{RandomChoice[w->els]} & Sequential Bernoulli decomposition \\
+    \texttt{RandomVariate[Normal[$\mu$,$\sigma$]]} & Truncated Gaussian, Eq.~\eqref{eq:normalbin} \\
+    \texttt{RandomPermutation[n]} & Knuth shuffle via \texttt{RandomInteger} \\
+    \texttt{RandomSample[list,k]} & Partial Knuth shuffle \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+% ============================================================
+\begin{thebibliography}{40}
+
+\bibitem{Metropolis1953}
+N.~Metropolis, A.~W. Rosenbluth, M.~N. Rosenbluth, A.~H. Teller, and
+E.~Teller,
+\textit{Equation of State Calculations by Fast Computing Machines},
+J. Chem. Phys. \textbf{21}, 1087 (1953).
+
+\bibitem{Hastings1970}
+W.~K. Hastings,
+\textit{Monte Carlo Sampling Methods Using Markov Chains and Their Applications},
+Biometrika \textbf{57}, 97 (1970).
+
+\bibitem{Frenkel2002}
+D.~Frenkel and B.~Smit,
+\textit{Understanding Molecular Simulation: From Algorithms to Applications},
+2nd ed., Academic Press (2002).
+
+\bibitem{Allen1987}
+M.~P. Allen and D.~J. Tildesley,
+\textit{Computer Simulation of Liquids},
+Oxford University Press (1987).
+
+\bibitem{Newman1999}
+M.~E.~J. Newman and G.~T. Barkema,
+\textit{Monte Carlo Methods in Statistical Physics},
+Oxford University Press (1999).
+
+\bibitem{Levin2009}
+D.~A. Levin, Y.~Peres, and E.~L. Wilmer,
+\textit{Markov Chains and Mixing Times},
+American Mathematical Society (2009).
+
+\bibitem{Kawasaki1966}
+K.~Kawasaki,
+\textit{Diffusion Constants near the Critical Point for Time-Dependent Ising
+Models~I},
+Phys. Rev. \textbf{145}, 224 (1966).
+
+\bibitem{Whitelam2007}
+S.~Whitelam and P.~L. Geissler,
+\textit{Avoiding Unphysical Kinetic Traps in Monte Carlo Simulations of
+Strongly Attractive Particles},
+J. Chem. Phys. \textbf{127}, 154101 (2007).
+
+\bibitem{Whitelam2009}
+S.~Whitelam, E.~H. Feng, M.~F. Hagan, and P.~L. Geissler,
+\textit{The Role of Collective Motion in Examples of Coarsening and Self-Assembly},
+Soft Matter \textbf{5}, 1251 (2009).
+
+\bibitem{SwendsenWang1987}
+R.~H. Swendsen and J.-S. Wang,
+\textit{Nonuniversal Critical Dynamics in Monte Carlo Simulations},
+Phys. Rev. Lett. \textbf{58}, 86 (1987).
+
+\bibitem{Wolff1989}
+U.~Wolff,
+\textit{Collective Monte Carlo Updating for Spin Systems},
+Phys. Rev. Lett. \textbf{62}, 361 (1989).
+
+\bibitem{LiuLuijten2004}
+J.~Liu and E.~Luijten,
+\textit{Rejection-Free Geometric Cluster Algorithm for Complex Fluids},
+Phys. Rev. Lett. \textbf{92}, 035504 (2004).
+
+\bibitem{Geweke2004}
+J.~Geweke,
+\textit{Getting it Right: Joint Distribution Tests of Posterior Simulators},
+J. Am. Stat. Assoc. \textbf{99}, 799 (2004).
+
+\bibitem{Kelly1979}
+F.~P. Kelly,
+\textit{Reversibility and Stochastic Networks},
+Wiley (1979).
+
+\bibitem{Norris1998}
+J.~R. Norris,
+\textit{Markov Chains},
+Cambridge University Press (1998).
+
+\bibitem{Manousiouthakis1999}
+V.~I. Manousiouthakis and M.~W. Deem,
+\textit{Strict Detailed Balance is Unnecessary in Monte Carlo Simulation},
+Phys. Rev. E \textbf{59}, 2 (1999).
+
+\bibitem{Bernard2009}
+E.~P. Bernard, W.~Krauth, and D.~B. Wilson,
+\textit{Event-Chain Monte Carlo Algorithms for Hard-Sphere Systems},
+Phys. Rev. E \textbf{80}, 056704 (2009).
+
+\bibitem{Glauber1963}
+R.~J. Glauber,
+\textit{Time-Dependent Statistics of the Ising Model},
+J. Math. Phys. \textbf{4}, 294 (1963).
+
+\bibitem{Turing1936}
+A.~M. Turing,
+\textit{On Computable Numbers, with an Application to the
+Entscheidungsproblem},
+Proc. London Math. Soc. \textbf{s2-42}, 230 (1936).
+
+\bibitem{HornJohnson1985}
+R.~A. Horn and C.~R. Johnson,
+\textit{Matrix Analysis},
+Cambridge University Press (1985).
+
+\bibitem{Daws2004}
+C.~Daws,
+\textit{Symbolic and Parametric Model Checking of Discrete-Time Markov
+  Chains},
+in \textit{Proc.\ ICTAC 2004}, LNCS 3407, Springer (2005).
+
+\bibitem{Kwiatkowska2011}
+M.~Kwiatkowska, G.~Norman, and D.~Parker,
+\textit{PRISM 4.0: Verification of Probabilistic Real-Time Systems},
+in \textit{Proc.\ CAV 2011}, LNCS 6806, pp.~585--591, Springer (2011).
+
+\bibitem{Dehnert2017}
+C.~Dehnert, S.~Junges, J.-P.~Katoen, and M.~Volk,
+\textit{A Storm is Coming: A Modern Probabilistic Model Checker},
+in \textit{Proc.\ CAV 2017}, LNCS 10427, pp.~592--600, Springer (2017).
+
+\bibitem{Gehr2016}
+T.~Gehr, S.~Misailovic, and M.~Vechev,
+\textit{PSI: Exact Symbolic Inference for Probabilistic Programs},
+in \textit{Proc.\ PLDI 2016}, pp.~662--677, ACM (2016).
+
+\bibitem{Meurer2017}
+A.~Meurer \textit{et al.},
+\textit{SymPy: Symbolic Mathematics in Python},
+PeerJ Computer Science \textbf{3}, e103 (2017).
+
+\bibitem{Bezanson2017}
+J.~Bezanson, A.~Edelman, S.~Karpinski, and V.~B.~Shah,
+\textit{Julia: A Fresh Approach to Numerical Computing},
+SIAM Review \textbf{59}(1), 65--98 (2017).
+
+\bibitem{Gowda2021}
+S.~Gowda, Y.~Ma, A.~Cheli, M.~Gw\'{o}\'{z}d\'{z}, V.~B.~Shah,
+A.~Edelman, and C.~Rackauckas,
+\textit{Symbolics.jl: A Modern Computer Algebra System for a Modern
+  Language},
+arXiv:2105.03949 (2021).
+
+\bibitem{Cassette}
+J.~Revels,
+\textit{Cassette.jl: Overdubbing Context-Dependent Execution in Julia},
+\url{https://github.com/JuliaLabs/Cassette.jl} (2018).
+
+\bibitem{Mathematica}
+Wolfram Research,
+\textit{Mathematica, Version 14},
+Wolfram Research, Inc., Champaign, IL (2024).
+
+\bibitem{FunSearch2023}
+B.~Romera-Paredes \textit{et al.},
+\textit{Mathematical Discoveries from Program Search with Large Language
+  Models},
+Nature \textbf{628}, 73 (2024).
+
+\bibitem{AlphaEvolve2025}
+Google DeepMind,
+\textit{AlphaEvolve: A Coding Agent for Scientific and Algorithmic
+  Discovery},
+arXiv:2506.13131 (2025).
+
+\bibitem{PAL2023}
+L.~Gao \textit{et al.},
+\textit{PAL: Program-Aided Language Models},
+Proc.\ ICML, PMLR 202:10764--10799 (2023).
+
+\bibitem{ReAct2023}
+S.~Yao \textit{et al.},
+\textit{ReAct: Synergizing Reasoning and Acting in Language Models},
+ICLR (2023).
+
+\bibitem{Reflexion2023}
+N.~Shinn \textit{et al.},
+\textit{Reflexion: Language Agents with Verbal Reinforcement Learning},
+NeurIPS (2023).
+
+\bibitem{LLMLOOP2025}
+\textit{LLMLOOP: Automating Refinement of LLM-Generated Code through
+  Iterative Feedback},
+ICSME, arXiv:2603.23613 (2025).
+
+\bibitem{Siepmann1992}
+J.~I. Siepmann and D.~Frenkel,
+\textit{Configurational Bias Monte Carlo: A New Sampling Scheme for
+  Flexible Chains},
+Mol. Phys. \textbf{75}, 59 (1992).
+
+\bibitem{Hedges2015}
+L.~O. Hedges,
+\textit{libVMMC: Rejection-Free Monte Carlo for Hard Spheres},
+\url{https://github.com/lohedges/vmmc} (2015).
+
+\bibitem{WolframClient}
+Wolfram Research,
+\textit{WolframClientForPython},
+\url{https://github.com/WolframResearch/WolframClientForPython} (2019).
+
+\end{thebibliography}
+
+\end{document}

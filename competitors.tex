@@ -1,0 +1,717 @@
+%% competitors.tex — competitive analysis for DetailedBalanceChecker
+%% A brutally honest assessment of the field
+%% NOT for submission; internal reference document
+
+\documentclass[11pt,a4paper]{article}
+\usepackage[top=2.0cm,bottom=2.2cm,left=2.2cm,right=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue]{hyperref}
+\usepackage{enumitem}
+\setlength{\parskip}{5pt}
+\setlength{\parindent}{0pt}
+
+% Column types
+\usepackage{array}
+\newcolumntype{P}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\definecolor{darkred}{rgb}{0.7,0.0,0.0}
+\definecolor{darkgreen}{rgb}{0.0,0.55,0.0}
+\newcommand{\bad}[1]{\textcolor{darkred}{#1}}
+\newcommand{\good}[1]{\textcolor{darkgreen}{#1}}
+\newcommand{\DBC}{\textit{DetailedBalanceChecker}}
+
+\title{\textbf{Where \textit{DetailedBalanceChecker} Fits in the Literature}\\[4pt]
+\large A Competitive Analysis: Methods, Tools, and Honest Appraisal}
+\author{}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+This document provides a critical survey of every approach that competes with,
+complements, or substitutes for \DBC{} — a tool for the symbolic, algebraic
+verification of the detailed-balance condition in Monte Carlo algorithms.  The
+analysis covers statistical testing methods, probabilistic programming language
+tools, model checkers, formal verification systems, physics-domain validation
+tools, and software libraries.  The conclusion is that \DBC{} is genuinely unique
+in its specific niche: no existing tool provides automated symbolic DB verification
+of physics MC algorithms with free coupling constants.  However, the niche is
+narrow, the Mathematica dependency is a serious adoption barrier, and the
+community being targeted has almost no culture of formal algorithm verification.
+The analysis identifies where \DBC{} would be rejected by reviewers, where it
+would struggle to be used in practice, and what it would need to achieve broad
+impact.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{What we are comparing against}
+% ============================================================
+
+\DBC{} claims to verify the detailed-balance (DB) condition
+$T(i\to j)\,\pi(i) = T(j\to i)\,\pi(j)$
+for Monte Carlo algorithms by:
+(1) intercepting all random calls and reducing them to reads from a binary tape,
+(2) enumerating all execution paths by BFS to produce a symbolic transition matrix,
+(3) checking the DB condition algebraically with coupling constants as free symbols,
+giving a proof valid for all parameter values simultaneously.
+It is implemented in Mathematica, targets physics simulation algorithms (Kawasaki,
+VMMC, cluster moves) on lattices of up to roughly ten sites per dimension, and is
+the only tool of its kind.
+
+The honest question is: \emph{does anyone need this, and is there a better way to
+get the same thing?}
+
+% ============================================================
+\section{Category 1: Statistical testing of MCMC correctness}
+\label{sec:statistical}
+% ============================================================
+
+This is by far the most developed category, and its tools are what practitioners
+actually use.
+
+\subsection{Geweke (2004) joint-distribution test}
+
+The most widely cited MCMC correctness test~\cite{Geweke2004}.  If a Bayesian
+sampler is correct, forward simulation (draw $\theta$ from prior, $x$ from
+likelihood) and MCMC alternation must produce matching marginals on every test
+statistic; a $\chi^2$ or KS test detects divergence.  Correct machinery, clearly
+described, well-understood properties.
+
+\textbf{Assessment relative to \DBC{}:}  The Geweke test is statistical, not
+formal.  It cannot certify correctness; it can only fail to detect a violation.
+It also requires a Bayesian structure (known prior and likelihood), which physics
+simulation algorithms do not have.  For the specific use case of verifying VMMC or
+Kawasaki dynamics with free coupling constants, Geweke is completely inapplicable:
+there is no ``prior'' over coupling constants, and the stationary distribution is
+known only up to a partition function that depends on all couplings.
+
+\textbf{But here is the real problem:}  In the statistics and machine learning
+community, which is far larger than the physics simulation community, Geweke-style
+tests are entirely sufficient for almost all applications.  Most Bayesian samplers
+(Stan, PyMC, Turing.jl) operate on well-specified models where the joint
+distribution is known.  \DBC{} has nothing to offer this much larger community.
+
+\subsection{Simulation-Based Calibration (SBC)}
+
+Talts et al.~\cite{Talts2018} showed that if parameters $\theta^*$ are drawn from
+the prior and data $x^*$ from the likelihood, the rank of $\theta^*$ among
+posterior samples must be uniform.  Implemented in Stan's workflow and the R
+package \texttt{SBC}.  Well-adopted in Bayesian statistics.  Strictly more
+informative than Geweke for detecting subtle biases.
+
+\textbf{Assessment:}  Same fundamental barriers as Geweke: Bayesian structure
+required, statistical not formal.  Not applicable to physics MC.
+
+\subsection{MCUnit / Gandy \& Scott (2020)}
+
+Gandy \& Scott~\cite{GandyScott2020} introduced the \emph{Exact Invariance Test}:
+a sequential hypothesis test for whether a given Markov chain has a specified
+invariant distribution, with guaranteed exact $p$-values (i.e., the false
+rejection probability is controlled non-asymptotically).  Implemented as the R
+package \texttt{mcunit} and Julia package \texttt{MCMCDebugging.jl}.
+
+\textbf{Assessment:}  More rigorous than Geweke in the sense that $p$-values are
+exact, but still fundamentally statistical.  Tests the \emph{invariant distribution},
+not DB directly.  A sampler that breaks DB but preserves the invariant distribution
+(as in the rightward-cluster example) would pass.  Requires an explicitly computable
+target distribution.  Not applicable to physics MC algorithms.
+
+\subsection{Wallerberger \& Gull (2017): physics-domain testing}
+
+The most relevant competitor from the physics domain~\cite{WallerbergerGull2017}.
+Uses exact analytical identities (Schwinger--Dyson equations, Ward identities)
+satisfied by the Ising model and the Anderson impurity model to test whether a
+simulation produces statistically consistent output.  Code released on
+GitHub~(CQMP/HypothesisTesting).  Applicable to large production simulations.
+
+\textbf{Assessment:}  Tests algorithm \emph{outputs} against known analytical
+benchmarks — cannot test \emph{novel} algorithms for which no identities are
+known.  Statistical, not formal.  The approach becomes vacuous precisely when the
+algorithm is new and when the absence of known identities is the problem.
+\DBC{} can test novel algorithms without any analytical benchmark, which is the
+case that actually matters for new algorithm development.
+
+\textbf{However:}  For practitioners working with the Ising model or known
+integrable systems, Wallerberger--Gull is far more convenient, scalable to large
+systems, and requires no algorithm re-implementation.  In this regime \DBC{} is
+both less convenient and less informative.
+
+\subsection{Tjelmeland \& Kvaløy (2025): catching bugs in published samplers}
+
+Recent work~\cite{TjelmelandKvaloy2025} found a bug in a G-Wishart sampler that
+had been in the literature for years.  The method: initialize an MH chain with
+a sample from the claimed sampler, run fixed steps, exploit exchangeability at
+stationarity.  This is a practical demonstration that statistical tests can find
+real bugs in published algorithms.
+
+\textbf{Assessment:}  An important reminder that statistical tests \emph{do} catch
+real bugs, and that the literature contains wrong algorithms.  The question is
+whether \DBC{}'s formal approach catches bugs that statistics misses.
+The rightward-cluster example (Section~\ref{sec:usecases}) provides one clear
+case where statistical tests fail categorically.  Whether this class of bugs is
+common in practice is unknown.
+
+\subsection{Physical\_validation (Shirts et al.)}
+
+The \texttt{physical\_validation} Python package~\cite{PhysicalValidation2018}
+validates molecular dynamics simulations by checking energy conservation, kinetic
+energy distributions, and ensemble consistency across multiple state points.
+Integrated into GROMACS's automated testing pipeline.
+
+\textbf{Assessment:}  Targets MD, not MC.  Does not check DB.  But represents the
+kind of practical, automated testing infrastructure that production simulation
+software actually adopts.  The contrast with \DBC{}'s Mathematica-based workflow
+is stark: \texttt{physical\_validation} is a \texttt{pip install} that integrates
+with existing Python workflows and runs on production trajectories from GROMACS.
+This is the adoption model that works.
+
+\textbf{Critical point:}  \bad{The physics simulation community has shown it will
+adopt automated testing tools when they integrate into existing workflows and
+operate on production-scale data.  A Mathematica tool that requires algorithm
+re-implementation and only works for $\lesssim10$ sites does not fit this model.}
+
+% ============================================================
+\section{Category 2: Probabilistic programming with correctness guarantees}
+\label{sec:ppl}
+% ============================================================
+
+\subsection{Hakaru (Narayanan et al. 2016)}
+
+Hakaru~\cite{Narayanan2016} is a Haskell-embedded PPL that generates
+Metropolis--Hastings kernels automatically via a \emph{disintegration}
+transformation.  The guarantee: any MH kernel produced by Hakaru satisfies DB
+\emph{by construction}, assuming the transformation is sound.  This is a
+correct-by-construction approach rather than a post-hoc checker.
+
+\textbf{Assessment:}  In the MH framework, Hakaru is strictly superior to \DBC{}:
+it provides a proof by construction, without any BFS enumeration, for any model
+expressible in Hakaru's language.  It does not check externally written algorithms,
+cannot verify VMMC or cluster moves, and has not been applied to physics simulation.
+The key insight from reversible\_checker.tex applies here: Hakaru constructs MH
+kernels as involutions on an extended state space, which structurally guarantees
+DB~\cite{Neklyudov2020}.  \DBC{} checks whether an externally written algorithm
+happens to satisfy DB; Hakaru builds one that must.
+
+\textbf{But:}  Hakaru appears to be a research prototype, not production software.
+The GitHub repository (hakaru-dev/hakaru) was last actively updated in 2019.
+The disintegration transformation is only proven sound for a specific fragment of
+the language.  Application to complex physics algorithms (which have non-standard
+link probabilities, frustration conditions, and Gaussian proposals) would require
+significant new language development.
+
+\subsection{Gen.jl (Cusumano-Towner et al.)}
+
+Gen~\cite{Gen} is a Julia PPL supporting custom MCMC kernels.  It provides runtime
+checks (\texttt{check=true}) that detect ``common bugs that break stationarity.''
+The involutive MCMC extension~\cite{Lew2020} provides structural DB guarantees for
+kernels expressed as involutions.  In active production use.
+
+\textbf{Assessment:}  Gen's involutive MCMC is elegant and correct-by-construction
+for algorithms expressible in that framework.  Runtime checks are better than
+nothing.  But: (1) only applies to algorithms written within Gen; (2) runtime
+checks are statistical, not formal; (3) VMMC's cluster-building logic with
+frustrated links is not naturally an involution on a simple extended state space.
+
+\subsection{PSI Solver (Gehr et al., ETH Zurich)}
+
+PSI~\cite{Gehr2016} computes exact symbolic posterior distributions from
+probabilistic programs using symbolic integration.  It produces rational function
+representations of posteriors and outperforms Mathematica/Maple on certain
+simplifications.  Actively maintained, open source.
+
+\textbf{Assessment:}  PSI is the closest tool to \DBC{} in the symbolic/algebraic
+dimension.  In principle, one could write a transition probability computation
+$T(i\to j)$ as a PSI program and have PSI produce the symbolic expression.
+In practice: PSI is designed for Bayesian inference in models, not for analyzing
+imperative MC algorithm transition structures.  It has no mechanism for
+systematically enumerating all execution paths of a random algorithm and
+constructing a transition matrix.  The gap between ``symbolic posterior inference
+for a model'' and ``symbolic transition matrix for an algorithm'' is substantial.
+
+\textbf{Critical point:}  If someone with PSI expertise wanted to build a DB
+checker, PSI would be a better foundation than Mathematica in several respects:
+open source, actively maintained, proven inference machinery.  The Mathematica
+implementation of \DBC{} uses Block/UpValue in a way that is genuinely hard to
+replicate outside Mathematica, which is both an advantage (robust interception)
+and a long-term risk (proprietary dependency, maintenance).
+
+% ============================================================
+\section{Category 3: Model checking}
+\label{sec:modelchecking}
+% ============================================================
+
+\subsection{PRISM and Storm}
+
+PRISM~\cite{Kwiatkowska2011} and Storm~\cite{Dehnert2017} are mature, actively
+maintained probabilistic model checkers.  Storm's parametric analysis produces
+rational functions of symbolic parameters for reachability and steady-state
+properties of Markov chains.  Both are open source and have Python APIs.
+
+\textbf{Assessment:}  In principle, if one manually encoded an MC algorithm as a
+parametric PRISM/Storm model, these tools could compute symbolic transition
+probabilities, from which DB checking is a post-processing step.  In practice, no
+published work does this for any physics MC algorithm.  The barriers are:
+\begin{enumerate}[nosep]
+  \item Manual model construction: translating a VMMC algorithm from Mathematica
+    (or C++) to the PRISM/JANI input language is a significant manual effort.
+  \item Property specification: DB is an algebraic equality of transition products,
+    not a PCTL/CSL formula.  Verification requires a post-processing step outside
+    the model checker.
+  \item No random-call interception: Storm does not intercept \texttt{RandomReal[]}
+    or analogous calls and build an execution tree automatically.  That is the
+    core innovation of \DBC{}.
+\end{enumerate}
+
+\textbf{Verdict:}  Storm+parametric analysis is the closest technically capable
+alternative, but the gap between ``capable in principle'' and ``usable in practice''
+is large.  A Storm-based DB checker would need all of \DBC{}'s innovations applied
+to a Storm front-end.  It would be a better long-term foundation (open source,
+larger team, more users) but does not currently exist.
+
+% ============================================================
+\section{Category 4: Formal verification (theorem provers)}
+\label{sec:formal}
+% ============================================================
+
+\subsection{Isabelle/HOL and Lean/Mathlib}
+
+Hölzl's Isabelle/HOL formalization of Markov chains~\cite{Holzl2017} and the
+Lean/Mathlib probability library (2024,~arXiv:2510.04070) provide the foundational
+infrastructure for machine-checked proofs about Markov chains.  In principle, one
+could prove DB for a specific MCMC algorithm in Isabelle or Lean with full machine
+checking.
+
+\textbf{Assessment:}  A machine-checked Isabelle proof would be strictly stronger
+than \DBC{}'s CAS-algebra output: it would provide an absolute formal guarantee.
+In practice: no published Isabelle, Coq, or Lean proof of DB exists for any
+nontrivial MCMC algorithm.  The Lean Mathlib work formalizes Markov kernels and
+basic reversibility theory but has not produced proofs for specific algorithms.
+The effort required to prove DB for VMMC in Lean is a multi-year research project
+in its own right.
+
+\textbf{Critical point:}  \DBC{} occupies a middle ground between ``statistical
+test'' (fast, scalable, no proof) and ``formal theorem prover'' (complete proof,
+human-years of effort).  The CAS approach gives a proof at low cost.  This
+middle-ground position is exactly right for the use case, but it is worth being
+honest: CAS algebra is not machine-checked in the Lean/Coq sense.  If Mathematica's
+\texttt{FullSimplify} returns zero due to an algebraic identity, that is a
+proof; if it returns zero due to a CAS bug, it is not.  The trust model of \DBC{}
+is fundamentally different from formal theorem provers.
+
+% ============================================================
+\section{Category 5: Involutive MCMC and structural guarantees}
+\label{sec:involutive}
+% ============================================================
+
+The most important insight from reversible\_checker.tex is the hierarchy:
+\[
+  \underbrace{\text{bijection}}_{\text{reversible language}} \;\subsetneq\;
+  \underbrace{\text{involution + uniform aux}}_{\text{DB w.r.t.\ uniform}} \;\subsetneq\;
+  \underbrace{\text{correct acceptance w.r.t.\ }\pi}_{\text{DB for target }\pi}.
+\]
+
+Neklyudov et al.'s involutive MCMC framework~\cite{Neklyudov2020} shows that
+any iMCMC chain (algorithm expressible as a measure-preserving involution on an
+extended state space) automatically satisfies DB.  Tierney~\cite{Tierney1998} and
+Duane et al.~\cite{Duane1987} showed that MH and HMC are both instances.
+Gen's involutive MCMC extension provides a programming interface for specifying
+such algorithms in Julia.
+
+\textbf{Assessment:}  The involutive framework provides a sufficient structural
+condition for DB that is strictly stronger than what \DBC{} offers: if you can
+prove your algorithm is an involution, you have DB without any BFS.  However:
+\begin{enumerate}[nosep]
+  \item Many algorithms of interest (particularly VMMC with its frustrated-link
+    cluster building) are \emph{not} naturally expressible as simple involutions on
+    a finite extended state space.
+  \item The involution condition gives DB with respect to the \emph{Lebesgue
+    measure} on the extended space; obtaining DB with respect to a specific $\pi$
+    requires additionally that the acceptance ratio is correctly computed.
+  \item Even if VMMC can be expressed as an involution, \bad{verifying that a
+    specific implementation correctly implements the involution requires a separate
+    check} — which is exactly what \DBC{} provides.
+\end{enumerate}
+
+\textbf{Bottom line:}  The involutive framework and \DBC{} are complementary, not
+competing.  The involutive framework provides a design principle; \DBC{} verifies
+implementations.  For algorithms not naturally expressible as involutions (which
+includes VMMC), the involutive framework offers no direct path to correctness.
+
+% ============================================================
+\section{Category 6: Balance Condition Library and related software}
+\label{sec:software}
+% ============================================================
+
+\subsection{BCL — Balance Condition Library (CMSI, University of Tokyo)}
+
+The MateriApps software catalog lists a ``Balance Condition Library'' (BCL) from
+the Computational Materials Science Initiative at the University of Tokyo.  The
+description is minimal and documentation sparse; it appears to be a utility for
+computing and verifying balance conditions in quantum Monte Carlo contexts,
+possibly related to the ALF/QUEST QMC packages.
+
+\textbf{Assessment:}  This is the closest named software to \DBC{} in the physics
+simulation domain.  However, based on available documentation, BCL appears to
+check balance conditions numerically at specific parameter values, not symbolically.
+If this is correct, it is fundamentally weaker than \DBC{}.
+\bad{This requires further investigation before claiming priority.}
+
+\subsection{MCMCDebugging.jl}
+
+A Julia package in the TuringLang ecosystem that implements the
+Gandy--Scott exact invariance test.  Not a symbolic verifier; extends the
+statistical testing approach to Julia.  Open source, actively maintained.
+
+\textbf{Assessment:}  Inferior to \DBC{} for formal DB verification.  Superior
+for practitioners who want a quick, scalable statistical test within Julia workflows.
+
+% ============================================================
+\section{The structural gap: no symbolic DB checker exists for physics MC}
+\label{sec:gap}
+% ============================================================
+
+After exhaustive search, \emph{no existing tool provides what \DBC{} provides}:
+automated extraction of a symbolic transition matrix from an existing MC algorithm,
+algebraic verification of DB with free coupling constants, for physics simulation
+algorithms (cluster moves, Kawasaki dynamics, VMMC) without a Bayesian model
+structure.
+
+Table~\ref{tab:comparison} summarises the landscape.
+
+\begin{table}[h]
+  \centering
+  \caption{Comparison of approaches to MCMC correctness verification.
+    FP = formal proof.  Phys = applicable to physics MC.
+    Free params = works for all parameter values simultaneously.
+    Auto = no manual model construction required.}
+  \label{tab:comparison}
+  \footnotesize
+  \renewcommand{\arraystretch}{1.2}
+  \begin{tabular}{@{}P{3.2cm}ccccP{3.2cm}@{}}
+    \toprule
+    Method & FP? & Phys? & Free params? & Auto? & Status \\
+    \midrule
+    Geweke (2004) & No & No & No & Yes & Widely used \\
+    SBC / Cook-Gelman & No & No & No & Yes & Widely used \\
+    MCUnit / Gandy-Scott & No & No & No & Yes & Active (R/Julia) \\
+    Wallerberger-Gull (2017) & No & Partial & No & Yes & Code on GitHub \\
+    Tjelmeland-Kvaløy (2025) & No & No & No & Yes & Very recent \\
+    Hakaru (2016) & Yes (constr.) & No & Limited & Partial & Appears dormant \\
+    Gen.jl iMCMC & Partial & No & No & Partial & Active \\
+    PSI Solver & Yes (symbolic) & No & Yes & Partial & Active \\
+    PRISM / Storm & Yes (parametric) & Theoretically & Yes & No & Active \\
+    Isabelle/HOL & Yes (full) & Theoretically & Yes & No & No proofs yet \\
+    physical\_validation & No & MD only & No & Yes & Active, GROMACS \\
+    BCL (CMSI) & Unclear & Yes (QMC) & Unknown & Unknown & Sparse docs \\
+    \midrule
+    \textbf{DBC} (this work) & Yes (CAS) & Yes & Yes & Yes & Active \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% ============================================================
+\section{Critical assessment: where \DBC{} would struggle}
+\label{sec:criticisms}
+% ============================================================
+
+Despite being unique, \DBC{} faces substantive problems that reviewers, users,
+and competitors will raise.  These are listed without softening.
+
+\subsection{The Mathematica dependency is a serious barrier}
+
+Mathematica costs \$400/year for individuals and \$2500+/year for institutions.
+The physics simulation community predominantly uses C++, Python, and Julia, and
+large fractions of computational physics groups at universities do not have
+institutional Mathematica licenses.  \bad{A tool that requires Mathematica cannot
+achieve broad adoption in a community that does not use Mathematica.}
+
+The Block/UpValue mechanism is genuinely Mathematica-specific and hard to replicate,
+which is why it was chosen.  But from an adoption perspective, this is an anchor.
+PSI Solver, Storm, and Gen.jl are all open-source and pip/Julia-installable.
+\DBC{} is not.
+
+The paper's discussion section acknowledges Julia/Cassette.jl as an alternative,
+but that port does not exist yet.  Reviewers will ask why the paper introduces a
+tool in a proprietary language when open-source alternatives are feasible.
+
+\subsection{The state space limitation is a real constraint, not just a caveat}
+
+The claim ``detailed-balance violations are a property of the algorithm, not the
+system size'' is \emph{mostly} true but not always.  Correctness on a $2\times2$
+lattice does not automatically imply correctness on a $200\times200$ lattice for
+all algorithm variants.  Algorithms that depend on the system size through modular
+arithmetic, boundary conditions, or indexing can have bugs that only appear above
+a threshold size.  The missing-direction VMMC example already demonstrates this:
+the algorithm passes on $2\times2$ but fails on $3\times3$ precisely because of
+boundary condition effects.  \bad{This undercuts the ``small system suffices''
+argument.}
+
+The correct claim is more nuanced: structural bugs (wrong acceptance rule, missing
+reverse move) manifest on small systems, but implementation bugs (wrong modular
+arithmetic, off-by-one in boundary conditions) may not.  This distinction should
+be made explicit and honest in any publication.
+
+\subsection{The target community has almost no verification culture}
+
+In the physics simulation community, the dominant practice for algorithm
+verification is: (1) derive the algorithm analytically, (2) test on known systems
+at known parameters.  The idea of formal algorithmic verification is largely
+unknown.  The schism-pl/vmmc Rust repository (a production VMMC implementation)
+is self-described as ``probably correct.''  libVMMC has no automated DB check.
+Most VMMC users do not know that the missing-direction variant would pass numerical
+tests.
+
+\bad{There is a risk that no one uses the tool because no one knows they need it.}
+This is not a criticism of the tool's correctness, but of its adoption path.
+A tool that finds real bugs in widely used production code would rapidly build
+adoption.  A tool that proves that correct algorithms are correct does not.
+
+\subsection{The rightward-cluster example may be the only truly compelling case}
+
+The paper's central diagnostic example — an algorithm that passes all numerical
+tests while violating DB — is the rightward-only cluster algorithm.  This is a
+compelling illustration, but it may be a constructed example rather than a real
+bug found in a production algorithm.  Reviewers at JCTC will ask: \emph{has this
+tool found a bug in a real, published algorithm?}
+
+If the answer is no, the paper's impact is significantly reduced.  The strongest
+possible submission would include a case where \DBC{} finds a DB violation in a
+published or widely distributed algorithm that numerical tests would have missed.
+The G-Wishart case (Tjelmeland--Kvaløy 2025) showed this is possible with
+statistical methods; the symbolic approach should be able to do the same.
+
+\subsection{The Mathematica trust model creates a meta-level question}
+
+The claim is that a PASS from \DBC{} constitutes a ``formal proof.''  This claim
+rests on: (1) Mathematica's FullSimplify correctly proving algebraic identities;
+(2) the BFS correctly enumerating all paths; (3) the random-call interception
+correctly capturing all randomness.  Each of these is trusted but not verified.
+
+This is not a theoretical objection — CAS systems are extensively tested and rarely
+wrong on algebraic identities.  But the claim of ``formal proof'' should be made
+carefully.  A Lean or Coq proof is machine-checked by a kernel small enough to be
+trusted; Mathematica's FullSimplify is a large, complex system with bugs
+(Wolfram's bug tracker is public and has entries for FullSimplify incorrectly
+proving identities on edge cases).
+
+The more honest language is ``algebraic proof via CAS'' rather than ``formal
+proof.''  This is a stronger statement than ``statistical test'' but weaker than
+``machine-checked proof.''  The paper should be explicit about this.
+
+\subsection{JCTC reviewers will compare against involutive MCMC}
+
+The involutive MCMC framework (Neklyudov et al. 2020) shows that any algorithm
+expressible as an involution on an extended state space automatically satisfies DB.
+A referee with this background will ask: ``why not just implement VMMC as an
+involution and get DB for free?''
+
+The answer is that: (a) VMMC's cluster-building logic with frustrated links is
+not trivially an involution; (b) even if it were, verifying that a specific
+implementation correctly implements the involution requires a separate check;
+and (c) the involutive framework gives DB with respect to the uniform measure on
+the extended space, not necessarily with respect to a specific $\pi$ if the
+acceptance ratio is wrong.
+
+But the paper must engage seriously with Neklyudov et al.~\cite{Neklyudov2020},
+which is not currently cited.
+
+\subsection{The BFS cost limits the complexity of testable algorithms}
+
+A VMMC algorithm on a $3\times3$ lattice with abstract coupling fields takes 12.5
+minutes on 4 kernels.  On a $4\times4$ lattice this would be estimated
+$\sim\!1000\times$ longer — months on 4 kernels.  \bad{The exponential scaling wall
+is fundamental, not implementational.}
+
+For real VMMC simulations, users work on $50\times50$ or larger lattices.  The
+argument ``small system suffices to prove structural correctness'' is sound but
+must be presented carefully, since the bugs that users actually introduce in
+production code are often precisely the boundary-condition and indexing bugs that
+require larger systems to manifest.
+
+\subsection{LLM loop section is prospective, and this weakens the paper}
+
+The use-case section describing LLM-assisted algorithm discovery is entirely
+prospective.  JCTC reviewers will likely view this as speculative and will suggest
+it be removed or substantially shortened.  The paper is stronger if focused on what
+the tool demonstrably does: verify existing algorithms.  The LLM loop section
+risks making the paper look like it is overselling.
+
+% ============================================================
+\section{Where \DBC{} would receive genuine adoption}
+\label{sec:adoption}
+% ============================================================
+
+Despite the above criticisms, there are scenarios where \DBC{} would be genuinely
+valued.
+
+\textbf{1. As a development tool for new cluster algorithms.}  Researchers proposing
+new cluster algorithms (variants of VMMC, new rejection-free schemes, algorithms for
+non-standard geometries) currently have to prove DB analytically, which is tedious
+and error-prone.  \DBC{} automates this.  Any group developing a new algorithm and
+needing to certify it would benefit from the tool.  This is a small but real
+community.
+
+\textbf{2. As a sanity check for algorithm implementations.}  Even when the
+algorithm is known to be correct analytically, its implementation may contain
+subtle bugs.  The missing-direction VMMC example shows that a single-line change
+in the displacement list can break DB in a way that no statistical test detects.
+Groups that release simulation software (e.g., libVMMC, HOOMD's patch-particle MC)
+could run \DBC{} on their implementations as a test.
+
+\textbf{3. For teaching and graduate training.}  The ability to generate and inspect
+the full symbolic transition matrix for small systems (say, a 4-site ring) is
+pedagogically valuable.  Students can see exactly why detailed balance holds, where
+the Metropolis criterion cancels, and what happens when it is violated.  The Table
+of transitions for the Kawasaki ring in the paper is already an excellent
+pedagogical illustration.
+
+\textbf{4. For the LLM discovery loop (if ever implemented).}  If the LLM-in-the-loop
+architecture is implemented, \DBC{} would provide qualitatively better feedback than
+any statistical test.  The symbolic counterexample localises the error to a specific
+algebraic term, which the LLM can reason about.  This is a strong argument for
+investing in the tool, but requires a working implementation to demonstrate.
+
+% ============================================================
+\section{What would make the paper significantly stronger}
+\label{sec:improvements}
+% ============================================================
+
+In rough order of impact:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Find a real bug.}  Apply \DBC{} to a published or widely-used
+    algorithm and find a DB violation that numerical tests would have missed.
+    This is the single most impactful result possible.
+
+  \item \textbf{Engage with Neklyudov et al.~\cite{Neklyudov2020}.}  The involutive
+    MCMC framework is the natural conceptual competitor.  Explain why \DBC{} is
+    needed even if one adopts the involutive design principle.
+
+  \item \textbf{Provide a Julia or Python prototype.}  Even a limited Julia port
+    (covering Kawasaki dynamics) would dramatically reduce the Mathematica barrier
+    and show that the approach is not language-locked.
+
+  \item \textbf{Demonstrate on a real non-Kawasaki production algorithm.}  The
+    examples currently focus on algorithms written for the paper.  Applying \DBC{}
+    to an existing published implementation (e.g., a released VMMC code) and
+    reporting the outcome, whether PASS or FAIL, would demonstrate real-world
+    applicability.
+
+  \item \textbf{Quantify the ergodicity and physical fidelity metrics on the examples.}
+    The paper describes M1 and M2 but does not report them for any algorithm.
+    Report at least one set of numbers.
+
+  \item \textbf{Be more precise about the ``formal proof'' claim.}  Replace ``formal
+    proof'' with ``algebraic proof via CAS'' throughout and explain what Mathematica's
+    FullSimplify trusts.
+\end{enumerate}
+
+% ============================================================
+\section{Summary verdict}
+\label{sec:verdict}
+% ============================================================
+
+\DBC{} is genuinely unique in its specific niche: automated symbolic DB verification
+of physics MC algorithms with free parameters.  No published tool, software package,
+or paper describes anything equivalent.  The gap is real.
+
+However, the gap is narrow.  The physics simulation community is small, has almost
+no verification culture, and works in C++/Python/Julia rather than Mathematica.
+The statistics/ML community, which is much larger, has entirely adequate testing
+tools (Geweke, SBC, MCUnit) for their use cases.  Formal verification communities
+(Isabelle, Lean) would view \DBC{}'s CAS proofs as preliminary rather than definitive.
+
+The tool would be compelling to:
+\begin{itemize}[nosep]
+  \item Groups developing new cluster MC algorithms (a small but real community)
+  \item Physics simulation software maintainers who want automated tests
+  \item Graduate students and educators in computational statistical physics
+\end{itemize}
+
+The tool would struggle to gain adoption from:
+\begin{itemize}[nosep]
+  \item The large Bayesian MCMC community (SBC is sufficient and more convenient)
+  \item Production physics simulation groups (C++/Python dependency mismatch)
+  \item Formal verification researchers (CAS $\neq$ machine-checked proof)
+\end{itemize}
+
+\textbf{The publication path is real if} the paper: (1) finds a genuine bug in a
+real algorithm, (2) engages honestly with the limitations listed here, (3) cites
+Neklyudov et al.\ and explains the relationship to involutive MCMC, and (4)
+maintains its current honest tone about what the tool does and does not prove.
+JCTC is the right venue.  The paper would be improved by tightening the use-cases
+section to focus on demonstrated results rather than prospective applications.
+
+% ============================================================
+\begin{thebibliography}{30}
+
+\bibitem{Geweke2004}
+J.~Geweke, \textit{Getting it Right: Joint Distribution Tests of Posterior Simulators}, J. Am. Stat. Assoc. \textbf{99}, 799 (2004).
+
+\bibitem{Talts2018}
+S.~Talts, M.~Betancourt, D.~Simpson, A.~Vehtari, and A.~Gelman, \textit{Validating Bayesian Inference Algorithms with Simulation-Based Calibration}, arXiv:1804.06788 (2018).
+
+\bibitem{GandyScott2020}
+A.~Gandy and G.~Scott, \textit{Unit Testing for MCMC and Other Monte Carlo Methods}, arXiv:2001.06465 (2020). R package \texttt{mcunit}.
+
+\bibitem{WallerbergerGull2017}
+M.~Wallerberger and E.~Gull, \textit{Hypothesis Testing of Scientific Monte Carlo Calculations}, Phys. Rev. E \textbf{96}, 053303 (2017).
+
+\bibitem{TjelmelandKvaloy2025}
+H.~Tjelmeland and J.~T. Kvaløy, \textit{An MCMC Hypothesis Test to Check a Claimed Sampler}, arXiv:2505.24400 (2025).
+
+\bibitem{PhysicalValidation2018}
+K.~A.~Merz and M.~R.~Shirts, \textit{Testing for Physical Validity in Molecular Simulations}, PLOS ONE (2018).
+
+\bibitem{Narayanan2016}
+P.~Narayanan, J.~Carette, W.~Romano, C.~Shan, and R.~Zinkov, \textit{Probabilistic Inference by Program Transformation in Hakaru}, FLOPS (2016).
+
+\bibitem{Gen}
+M.~Cusumano-Towner, F.~A.~Saad, A.~K.~Lew, and V.~K.~Mansinghka, \textit{Gen: a General-Purpose Probabilistic Programming System with Programmable Inference}, PLDI (2019).
+
+\bibitem{Lew2020}
+A.~K.~Lew, M.~Cusumano-Towner, B.~Sherman, M.~Carbin, and V.~K.~Mansinghka, \textit{Trace Types and the Metatheory of Non-Parametric MCMC}, POPL (2020).
+
+\bibitem{Gehr2016}
+T.~Gehr, S.~Misailovic, and M.~Vechev, \textit{PSI: Exact Symbolic Inference for Probabilistic Programs}, CAV (2016). \url{https://psisolver.org/}.
+
+\bibitem{Neklyudov2020}
+K.~Neklyudov, M.~Welling, E.~Egorov, and D.~Vetrov, \textit{Involutive MCMC: A Unifying Framework}, ICML (2020). arXiv:2006.16653.
+
+\bibitem{Tierney1998}
+L.~Tierney, \textit{A Note on Metropolis--Hastings Kernels for General State Spaces}, Ann. Appl. Probab. \textbf{8}, 1 (1998).
+
+\bibitem{Duane1987}
+S.~Duane, A.~D.~Kennedy, B.~J.~Pendleton, and D.~Roweth, \textit{Hybrid Monte Carlo}, Phys. Lett. B \textbf{195}, 216 (1987).
+
+\bibitem{Kwiatkowska2011}
+M.~Kwiatkowska, G.~Norman, and D.~Parker, \textit{PRISM 4.0: Verification of Probabilistic Real-Time Systems}, CAV (2011).
+
+\bibitem{Dehnert2017}
+C.~Dehnert, S.~Junges, J.-P.~Katoen, and M.~Volk, \textit{A Storm is Coming: A Modern Probabilistic Model Checker}, CAV (2017). \url{https://www.stormchecker.org/}.
+
+\bibitem{Holzl2017}
+J.~Hölzl, \textit{Markov Chains and Markov Decision Processes in Isabelle/HOL}, J. Autom. Reason. \textbf{59}, 345 (2017).
+
+\bibitem{Whitelam2007}
+S.~Whitelam and P.~L.~Geissler, \textit{Avoiding Unphysical Kinetic Traps in Monte Carlo Simulations of Strongly Attractive Particles}, J. Chem. Phys. \textbf{127}, 154101 (2007).
+
+\bibitem{GrosseDuvenaud2014}
+R.~Grosse and D.~Duvenaud, \textit{Testing MCMC Code}, arXiv:1412.5218 (2014).
+
+\bibitem{CharaccioloSokal1998}
+S.~Caracciolo and A.~D.~Sokal, \textit{A New Test for Random Number Generators}, arXiv:cond-mat/9806059 (1998).
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,877 @@
+================================================================================
+OPTIMIZATION PROCESS FOR PHYSICALLY FAITHFUL MC ALGORITHMS
+A framework for ground-truth generation, metric definition, and LLM-driven
+algorithm optimization with kinetic fidelity as the objective.
+================================================================================
+
+Last updated: 2026-05-27
+Context: DetailedBalanceChecker project (vmmc_continuous.wl, dbc_core.wl)
+
+--------------------------------------------------------------------------------
+0. CLARIFYING QUESTIONS / OPEN ASSUMPTIONS
+--------------------------------------------------------------------------------
+
+Before the framework is fixed, the following choices affect the design:
+
+Q1. Dimensionality of target physics: is the system genuinely 2D (monolayer on
+    a substrate, thin film), or is the 2D lattice a computational projection of
+    a 3D colloidal/polymer system? This determines whether the correct HI
+    reference is 2D (Stokes paradox regime) or 3D (Zimm with nu~0.588).
+
+    Assumed here: 3D physics projected onto 2D for computational tractability.
+    Ground truth runs in continuous 2D space with 3D-derived parameters. If the
+    system is genuinely 2D, the D_n(n) reference changes (see Section 4).
+
+Q2. Polymer topology: are the "sticky chains" linear (backbone + branches) or
+    arbitrary clusters (any bonded aggregate)? Linear chains change the cluster
+    diffusion exponent and introduce internal relaxation modes (Rouse modes).
+
+    Assumed here: arbitrary clusters (no covalent backbone, purely sticky LJ).
+    Extension to linear chains requires adding intrachain harmonic bonds and
+    computing normal-mode spectra.
+
+Q3. LLM code modification scope: does the LLM modify only the Algorithm[] body,
+    or can it also modify cluster-building logic ($vmmcBuildCluster), the
+    proposal distribution, and the time-accumulation rule?
+
+    Assumed here: full Algorithm[] and $vmmcBuildCluster are modifiable.
+    The DB checker and ergodicity checker constrain correctness automatically.
+
+Q4. Optimization budget per iteration: how many MC steps are acceptable per
+    algorithm evaluation? This determines which metrics are computable in-loop.
+
+    Assumed here: ~10^5 MC steps (seconds on a 20x20 lattice, N=20 particles).
+    Full F_s(q,t) curves require ~10^6 steps; these are used for periodic
+    validation only, not every iteration.
+
+--------------------------------------------------------------------------------
+1. OVERVIEW AND GOALS
+--------------------------------------------------------------------------------
+
+The aim is to build a reference-free optimization framework for Monte Carlo
+algorithms that simulate soft-matter / colloidal / polymer systems. The process
+has three layers:
+
+  Layer 1 (one-time, expensive):
+    Generate ground-truth trajectories from a physically exact simulation
+    (overdamped Langevin / Brownian dynamics), extract and store reference
+    metrics as a set of curves/numbers.
+
+  Layer 2 (every LLM iteration, fast):
+    Run the candidate algorithm, extract the same metrics rapidly, compute a
+    cost against the stored reference.
+
+  Layer 3 (optimization loop):
+    LLM proposes an Algorithm[] modification. DB + ergodicity checker validates
+    correctness. If it passes, Layer 2 runs. Cost is returned to LLM. Repeat.
+
+The key design principle: the metrics must be PHYSICAL OBSERVABLES that any
+correct algorithm must reproduce, not diagnostics of VMMC's specific deficiency.
+A hypothetical perfect algorithm -- one that exactly mimics physical dynamics --
+must achieve cost = 0. A bad algorithm (wrong kinetics, wrong D_n scaling, wrong
+relaxation spectrum) must achieve cost >> 0, regardless of whether the deficiency
+resembles VMMC's known error or something entirely new.
+
+--------------------------------------------------------------------------------
+2. WHAT CONSTITUTES "PHYSICAL REALITY" FOR THIS SYSTEM
+--------------------------------------------------------------------------------
+
+The physical system: N colloidal particles (spheres of radius a) in a 2D
+periodic domain, interacting via a LJ potential, suspended in a solvent of
+viscosity eta, at temperature T. The relevant dynamical regime is OVERDAMPED
+(colloidal particles, low Reynolds number): inertia is negligible.
+
+The governing equation is the SMOLUCHOWSKI / overdamped LANGEVIN equation:
+
+  dx_i/dt = (D_0 / k_BT) * F_i  +  sqrt(2 D_0) * xi_i(t)
+
+where D_0 = k_BT / (6 pi eta a) is the Stokes-Einstein single-particle diffusion
+coefficient, F_i = -dU/dx_i is the direct interparticle force, and xi_i(t) is
+Gaussian white noise with <xi(t) xi(t')> = delta(t-t').
+
+This is the ROUSE LIMIT (no hydrodynamic interactions between particles). It is
+the correct physical reference for:
+  - Concentrated suspensions / polymer melts (HI screened by surrounding chains)
+  - 2D lattice models (the checker's native geometry)
+  - First-principles benchmarking without HI complexity
+
+For DILUTE 3D suspensions, Zimm dynamics (HI via Oseen/RPY tensor) is more
+appropriate. The distinction:
+  - Rouse: D_cluster(n) = D_0 / n  (n independent random walkers)
+  - Zimm:  D_cluster(n) = D_0 * n^(nu - 1), nu ~ 0.588 (good solvent 3D)
+           D_cluster(n) = D_0 * n^(nu - 1), nu ~ 0.5  (theta solvent)
+  - VMMC:  D_cluster(n) ~ D_0                          (VMMC's kinetic error)
+
+RECOMMENDATION: start with the Rouse (overdamped Langevin without HI) reference.
+This is exact, fast to simulate, analytically known in the D_n limit, and is the
+correct ground truth for dense or 2D systems. Add Zimm HI in a second phase if
+dilute 3D physics is the target.
+
+2.1 The Physical Metrics Must Be Kinetic, Not Thermodynamic
+
+Any algorithm that satisfies detailed balance samples the correct Boltzmann
+distribution. Static properties -- pair correlation function g(r), cluster size
+distribution P(n), pressure -- are IDENTICAL between all DB-satisfying algorithms
+at equilibrium. These are useless for distinguishing algorithms.
+
+Only DYNAMICAL observables can serve as optimization metrics:
+  - Time-dependent mean squared displacement
+  - Intermediate scattering function (time decorrelation)
+  - Cluster diffusion coefficient spectrum
+  - Dynamic structure factor
+  - Non-Gaussian parameter of displacements
+
+--------------------------------------------------------------------------------
+3. GROUND TRUTH GENERATION
+--------------------------------------------------------------------------------
+
+3.1 Software Recommendation
+
+PRIMARY: LAMMPS (https://www.lammps.org/)
+
+Rationale:
+  - Free, open source, extensively validated for colloidal physics
+  - Has "fix brownian" (added 2021) for exact overdamped Langevin dynamics
+  - 2D periodic boundary conditions natively supported
+  - Python wrapper (lammps Python API) for scripted automation
+  - Pair style "lj/cut" with same parameters as the checker's lj_colloidal_system.wl
+  - Widely cited in soft matter literature: Thompson et al., Comput. Phys. Commun.
+    2022, 271, 108171
+
+SECONDARY (if Zimm / HI reference is needed): ESPResSo (https://espressomd.org/)
+
+Rationale:
+  - Free, open source, Python interface
+  - Has Lattice Boltzmann (LB) + MD coupling for full HI (3D or quasi-2D)
+  - Has MPCD module (multi-particle collision dynamics)
+  - Specifically designed for colloidal and soft-matter physics
+  - Cite: Weik et al., Eur. Phys. J. Special Topics 228, 1 (2019)
+
+ALTERNATIVE (custom, maximal control): Python BD script with NumPy/JAX
+
+For 2D LJ with N < 500 particles, a custom overdamped Langevin integrator is
+~50 lines of NumPy. This allows exact parameter matching to the VMMC model
+(same physLen, same epsLJ, same sigma, same periodic boundary). Disadvantage:
+slower than LAMMPS for large N; no free parallelism.
+
+3.2 Parameter Mapping from Lattice VMMC to Continuous BD
+
+The VMMC model uses:
+  - nGrid x nGrid lattice, physical length L_box = physLen * nGrid
+  - LJ sigma = sigLJ := physLen
+  - LJ epsilon = epsLJ
+  - numBeta = beta = 1/(k_BT)
+  - Gaussian proposal std = sigStep := physLen * sqrt(2 / (beta * epsLJ))
+  - Packing fraction eta = N * pi * (physLen/2)^2 / L_box^2
+
+The BD simulation uses:
+  - Box size L_box (same)
+  - LJ: U(r) = 4 * epsLJ * [(sigLJ/r)^12 - (sigLJ/r)^6]
+  - D_0 = 1 (set by convention; sets the time unit)
+  - Integration timestep dt chosen so max(|F_i| * dt) / sigLJ ~ 0.001--0.01
+  - Temperature: k_BT = 1 / beta
+
+Time unit convention (see Section 5): tau_0 = sigLJ^2 / D_0 = sigLJ^2
+
+3.3 Simulation Protocol
+
+For each (T, rho) state point:
+
+Step 1: Initialize
+  - Place N particles randomly with no overlaps in L_box x L_box periodic box
+  - Use same (physLen, epsLJ, numBeta, eta) as the VMMC run
+
+Step 2: Equilibrate (overdamped Langevin BD)
+  - Run for t_eq = 100 * tau_alpha where tau_alpha is the structural relaxation
+    time (estimated from a short test run). For sticky LJ at moderate densities,
+    tau_alpha ~ 10^2 -- 10^4 tau_0.
+  - Verify: P(n,t) and g(r) are stationary.
+
+Step 3: Production run
+  - Run for t_prod = max(1000 * tau_0, 100 * tau_alpha)
+  - Save configurations every tau_save = tau_0 / 10 (fine sampling for short-time)
+  - Save configurations every tau_save_coarse = 0.1 * tau_alpha (coarse for long-time)
+  - Record: particle positions, energies, cluster membership
+
+Step 4: Compute reference metrics (see Section 4)
+  - Store as: reference_metrics_{T}_{rho}.npz (or JSON)
+
+State points to cover:
+  - (high T, low rho):  k_BT = 1.5 * epsLJ, eta = 0.05   [dilute, few clusters]
+  - (mid T, mid rho):   k_BT = 0.5 * epsLJ, eta = 0.2    [moderate clustering]
+  - (low T, mid rho):   k_BT = 0.25 * epsLJ, eta = 0.2   [large persistent clusters]
+  - (low T, high rho):  k_BT = 0.25 * epsLJ, eta = 0.45  [dense melt]
+
+These four points span dilute (small n, weak bonds) to dense (large n, strong
+bonds), ensuring the optimization landscape covers both regimes.
+
+3.4 Analysis Tools
+
+For trajectory analysis:
+  - freud (https://freud.readthedocs.io): cluster finder, structure factor, RDF
+    Cite: Ramasubramani et al., Comput. Phys. Commun. 254, 107275 (2020)
+  - MDAnalysis (https://www.mdanalysis.org): MSD, van Hove, autocorrelation
+    Cite: Michaud-Agrawal et al., J. Comput. Chem. 32, 2319 (2011)
+  - NumPy/SciPy: fitting, FFT, KWW exponential fits
+
+--------------------------------------------------------------------------------
+4. METRICS: PHYSICAL OBSERVABLES
+--------------------------------------------------------------------------------
+
+4.1 Tier 1: Essential Kinetic Metrics (computed every optimization iteration)
+
+--- METRIC A: D_n(n) -- Cluster Diffusion Spectrum ---
+
+Definition: The diffusion coefficient of the cluster center-of-mass as a
+function of cluster size n, measured in the short-time window:
+
+  tau_step << Delta_t << tau_bond
+
+where tau_bond = characteristic bond lifetime and tau_step = MC step time.
+
+In this window, the cluster is intact and undergoing free diffusion:
+
+  D_n = <|Delta r_cm|^2>_n / (2 * d * Delta_t)    [d=2 for 2D]
+
+Reference (Rouse):        D_n^ref = D_0 / n
+Reference (Zimm 3D good): D_n^ref = D_0 * n^(nu-1), nu = 0.588
+Reference (Zimm theta):   D_n^ref = D_0 * n^(-0.5)
+
+Score contribution:
+  C_A = sum_n P(n) * [log(D_n^algo) - log(D_n^ref)]^2
+
+Weighted by P(n) (cluster size probability at equilibrium), so dominant cluster
+sizes at each state point contribute proportionally.
+
+Log scale: a factor-of-2 error at n=2 and n=20 are equally penalized. This is
+the correct scale for diffusion comparisons.
+
+How to compute rapidly (in-loop, fast):
+  1. Start from pre-equilibrated VMMC configurations (stored from a long VMMC run)
+  2. Run K = 50--200 MC steps from each configuration (K << tau_bond)
+  3. Record cluster assignments at t=0 (define by pair energy < 0, or d < 1.2*sigLJ)
+  4. Record Delta_r_cm for each cluster that survived intact to t=K
+  5. Aggregate D_n = mean(|Delta r_cm|^2) / (2d * K * delta_t) over all clusters
+     of each size n, across many starting configurations
+  6. Cost: compare to reference curve
+
+This requires only short simulations (seconds per state point).
+
+--- METRIC B: F_s(q,t) -- Self Intermediate Scattering Function ---
+
+Definition:
+  F_s(q, t) = (1/N) * |sum_i exp(i q * [r_i(t) - r_i(0)])|^2
+
+Averaged over wavevectors of magnitude q, initial times t=0, and particles i.
+
+F_s(q,0) = 1, F_s(q, infinity) = 0 for any ergodic system.
+
+Key wavevectors:
+  q_mono = 2*pi / sigLJ     [single-particle / monomer scale]
+  q_pair = pi / r_bond      [nearest-neighbor bond scale]
+  q_cluster = 2*pi / R_n    [typical cluster size scale, varies with state point]
+
+The DECAY TIME tau(q) extracted from F_s(q,t) = 1/e gives the relaxation
+timescale at length scale 2*pi/q.
+
+Physical interpretation:
+  - At q = q_mono: single-particle dynamics; tau(q_mono) ~ sigLJ^2 / D_0
+    Both VMMC and BD should agree here (single-particle moves).
+  - At q = q_cluster: cluster-scale dynamics; tau(q_cluster) ~ R_n^2 / D_n
+    VMMC overestimates D_n -> underestimates tau(q_cluster) -> F_s decays too fast.
+
+Reference: Banchio, Brady, J. Chem. Phys. 2003 "Accelerated Stokesian dynamics"
+for the form of F_s(q,t) in colloidal systems.
+
+Score contribution (using KWW fit F_s ~ exp(-(t/tau)^beta)):
+
+  C_B = sum_q w_q * (log tau^algo(q) - log tau^ref(q))^2
+        + lambda * sum_q w_q * (beta^algo(q) - beta^ref(q))^2
+
+where w_q is a wavevector weight (emphasise q_cluster > q_mono since q_mono is
+already constrained by D_0 calibration).
+
+The beta parameter (stretching exponent) captures whether the relaxation is
+exponential (simple diffusion) or stretched (heterogeneous). VMMC may get beta
+wrong even if tau is approximately correct at some q values.
+
+How to compute rapidly (in-loop):
+  F_s(q,t) requires a simulation of duration ~ 3 * tau(q_cluster).
+  For dense state points, tau(q_cluster) can be O(10^3-10^4) tau_0.
+  This is borderline for in-loop computation.
+
+  Fast option: compute F_s only at q_cluster and q_mono (not full spectrum).
+  Run VMMC for 3 * tau^ref(q_cluster) steps (known from ground truth).
+  This gives 2 data points per state point. Cost: ~10 minutes per iteration.
+
+  Slower option (full validation, run every 10 iterations): compute F_s(q,t)
+  at 5--10 q values and extract tau(q) and beta(q) for a full cost evaluation.
+
+4.2 Tier 2: Supporting Metrics (computed periodically, for full validation)
+
+--- METRIC C: MSD(t) and diffusion exponent alpha(t) ---
+
+Definition:
+  MSD(t) = <|r_i(t) - r_i(0)|^2>
+  alpha(t) = d log MSD / d log t    [= 1 for diffusion, < 1 for subdiffusion]
+
+At long times: MSD(t) = 2d * D_1 * t. Used to calibrate the time axis (see
+Section 5).
+
+At intermediate times: alpha(t) < 1 indicates a particle is trapped in a cluster
+cage (subdiffusive). The minimum value alpha_min and the timescale tau_sub where
+it occurs measure the severity of kinetic trapping.
+
+Physical reference: for Rouse, alpha_min and tau_sub are determined by cluster
+size distribution and bond lifetime. Both VMMC and BD should show subdiffusion at
+intermediate T, but VMMC's clusters diffuse too fast, which reduces the subdiffusive
+plateau -- a directly measurable kinetic error.
+
+--- METRIC D: Non-Gaussian Parameter alpha_2(t) ---
+
+Definition:
+  alpha_2(t) = <Delta r^4(t)> / [(1 + 2/d) * <Delta r^2(t)>^2]  -  1
+
+= 0 for Gaussian (Brownian) motion; > 0 for dynamically heterogeneous motion.
+
+The peak position tau_NGP and peak amplitude alpha_2^max characterize cooperative
+dynamics. VMMC with fast cluster moves may underestimate alpha_2^max (artificially
+reducing dynamic heterogeneity by accelerating large clusters) or misplace tau_NGP.
+
+--- METRIC E: Bond survival probability C_bond(t) ---
+
+Definition:
+  C_bond(t) = P(pair i,j bonded at time t | pair i,j bonded at t=0)
+
+Physically: how long individual LJ bonds persist. This is governed by the energy
+landscape (Boltzmann factor), NOT by translational diffusion. It is therefore
+expected to be IDENTICAL for VMMC and BD at the same (T, rho).
+
+ROLE IN OPTIMIZATION: C_bond(t) is a DIAGNOSTIC / NULL TEST, not a primary
+optimization target. If C_bond differs between VMMC and BD, there is a fundamental
+error in the algorithm's treatment of bond energetics. If C_bond agrees (as expected),
+it confirms the algorithm is correctly sampling bond configurations.
+
+--- METRIC F: Cluster lifetime distribution P(tau_cluster | n) ---
+
+Distribution of how long clusters of size n persist before gaining or losing a
+member. In BD: set by bond-breaking timescale ~ exp(beta * E_bond).
+In VMMC: also set by energy, but cluster moves may transiently break bonds during
+the propagation step (see Section 7 on frustration).
+
+4.3 Cost Function Structure
+
+Let C = {C_A, C_B_fast, C_B_full, C_C, C_D} be the metric costs defined above.
+
+PRIMARY COST (every iteration, fast):
+  C_fast = w_A * C_A  +  w_B * C_B_fast
+
+  w_A = 0.5, w_B = 0.5 initially. Can be tuned once the scale of C_A and C_B
+  is understood from trial runs.
+
+VALIDATION COST (every 10 iterations):
+  C_full = w_A * C_A  +  w_B * C_B_full  +  w_C * C_C  +  w_D * C_D
+
+CONSTRAINTS (binary, enforced before any cost computation):
+  - Detailed balance: PASS (from check.wls)
+  - Ergodicity: PASS (from check.wls)
+  If either fails, cost = infinity. Do not evaluate.
+
+--------------------------------------------------------------------------------
+5. MC-TO-TIME ALIGNMENT: KINETIC MONTE CARLO CONVENTION
+--------------------------------------------------------------------------------
+
+This is the most subtle aspect of the comparison and is often handled poorly.
+
+5.1 The Problem
+
+VMMC runs in "MC steps," BD runs in "physical seconds." For any kinetic comparison,
+the two time axes must be aligned. The alignment must not be circular (i.e., must
+not be calibrated using a metric that is itself being optimized).
+
+5.2 The Standard Convention (Kinetic Monte Carlo)
+
+Reference: Voter, Phys. Rev. B 34, 6819 (1986); Bortz, Kalos, Lebowitz,
+J. Comput. Phys. 17, 10 (1975).
+
+In kinetic MC, one MC "cycle" = N attempted moves (one per particle on average).
+Physical time per cycle is set by the SINGLE-PARTICLE DIFFUSION COEFFICIENT:
+
+  delta_t_MC = sigma^2 * <p_acc_single> / (2 * d * D_0)
+
+where:
+  sigma       = proposal standard deviation (sigStep for Gaussian VMMC)
+  p_acc_single = acceptance probability for a single-particle move
+  D_0         = physical single-particle diffusion coefficient
+  d           = spatial dimension
+
+This can be derived directly: a single particle proposing Gaussian displacements
+with std sigma, accepted with probability p_acc, achieves:
+  D_simulated = sigma^2 * p_acc / (2 * d * 1_MC_cycle)
+
+Setting D_simulated = D_0 gives delta_t_MC above.
+
+5.3 Empirical Calibration (Recommended)
+
+Rather than computing p_acc_single analytically:
+
+Step 1: Run the VMMC algorithm on a SINGLE PARTICLE (N=1) in a periodic box with
+        no interactions. Record MSD(t_MC) over 10^4 cycles.
+Step 2: Fit D_1^MC = MSD(t) / (2 * d * t) from the slope.
+Step 3: The physical time unit is:
+          delta_t = sigma_LJ^2 / D_0  [Stokes-Einstein unit, set D_0 = 1]
+        Set the time axis so D_1^MC = D_0:
+          t_phys = t_MC * (sigma_LJ^2 / D_1^MC)
+
+This empirical calibration:
+  - Works for any proposal distribution (Gaussian, uniform, etc.)
+  - Automatically accounts for the finite acceptance rate
+  - Is specific to SINGLE-PARTICLE moves only
+
+For cluster moves, the physical time elapsed is NOT the same as for single
+particle moves. Correct handling:
+
+  - Time contribution of a single-particle move: delta_t_single (as above)
+  - Time contribution of a cluster-of-n move:
+      delta_t_cluster(n) = delta_t_single (for VMMC; this is the approximation)
+      delta_t_cluster(n) = delta_t_single * n      (correct for Rouse: D_n = D_0/n)
+      delta_t_cluster(n) = delta_t_single * n^(1-nu) (correct for Zimm)
+
+This "variable time-step kinetic MC" is the physically principled interpretation.
+VMMC uses delta_t_cluster = delta_t_single for all n, which overcounts the
+physical time elapsed for large cluster moves by a factor of n. This is precisely
+the kinetic error D_n^VMMC = D_0 rather than D_0/n.
+
+5.4 Practical Implementation
+
+For in-loop metric computation, the procedure is:
+
+1. Calibrate delta_t using single-particle BD (no cluster moves) once per
+   parameter set (physLen, epsLJ, beta). Store as delta_t_cal.
+
+2. Run VMMC for N_steps MC cycles, tracking:
+   - Cumulative physical time t_phys = N_steps * delta_t_cal (first approximation)
+   - Or variable time: t_phys += delta_t_single per single-particle step,
+                        t_phys += delta_t_single * n per cluster-of-n step
+                       (more accurate, requires logging cluster sizes)
+
+3. Record particle positions at regular t_phys intervals. Compute metrics.
+
+The ground truth BD simulation uses the same delta_t_cal (trivially: BD already
+runs in physical time).
+
+5.5 Implications for Cluster Dynamics Comparison
+
+When comparing D_n^VMMC to D_n^ref:
+  - Use the SAME physical time axis for both (step 2 above)
+  - D_n^VMMC > D_n^ref indicates clusters are moving faster than physical reality
+  - The log-ratio log(D_n^VMMC / D_n^ref) is the natural score for C_A
+
+When comparing F_s(q,t):
+  - Use the SAME physical time axis for both
+  - tau^VMMC(q_cluster) < tau^ref(q_cluster) indicates too-fast cluster relaxation
+
+--------------------------------------------------------------------------------
+6. EFFICIENCY METRIC AND COST FUNCTION INTEGRATION
+--------------------------------------------------------------------------------
+
+6.1 What "Efficiency" Means for an MC Algorithm
+
+Sampling efficiency is the USEFUL WORK done per unit computational cost.
+For a kinetics-targeting algorithm, "useful work" is decorrelation from the
+current configuration; "computational cost" is the number of operations.
+
+Simple acceptance rate r_acc has known problems as an efficiency measure:
+  - r_acc = 1 trivially for the identity move (propose no move)
+  - r_acc ~ 0 is bad, but r_acc ~ 1 with tiny moves is equally bad
+  - For cluster moves, r_acc = 0.5 for a single-particle move and r_acc = 0.5
+    for a 100-particle cluster move are NOT equivalent in computational cost
+    or in decorrelation power.
+
+6.2 Recommended Efficiency Metric
+
+DECORRELATION RATE (eta):
+
+  eta = D_1 * delta_t^{-1}  [dimensionless, per unit of computation]
+
+where:
+  D_1 = measured single-particle diffusion coefficient from the run (physical units)
+  delta_t^{-1} = reciprocal of the wall-clock time per MC cycle (operations per second)
+
+A better version accounts for the cost of cluster moves:
+
+  eta_weighted = <n_eff * |Delta r_cm|^2> / (cost_per_step * sigma_LJ^2)
+
+where cost_per_step = mean number of energy evaluations per MC cycle
+(scales as ~n for cluster moves of size n).
+
+This naturally penalizes algorithms that:
+  - Have high acceptance rate but tiny moves (small |Delta r|^2)
+  - Have large decorrelation but at the cost of O(n^2) energy evaluations per step
+
+6.3 The 1/n Rejection Scheme and Its Efficiency Problem
+
+The 1/n rejection scheme (Refs: Whitelam, Geissler, J. Chem. Phys. 2007 footnote)
+rejects cluster-of-n moves with probability 1 - 1/n, recovering D_n = D_0/n.
+
+Efficiency impact:
+  - For a cluster of size n: O(n) energy evaluations to build the cluster
+    (cluster propagation step) + O(n) for the trial move evaluation
+  - But the move is ACCEPTED with probability 1/n on average
+  - Effective cost per useful cluster move: O(n^2)
+  - This scales very poorly: n=10 -> 100x more expensive than a single particle move
+
+For the Zimm correction (1 - n^{nu-1} rejection):
+  - Acceptance probability: n^{nu-1} ~ n^{-0.41} for nu=0.588
+  - Less severe, but still significant overhead for large n
+
+The optimal solution (discussed in Section 9) is to fix the PROPOSAL rather
+than reject after evaluation: sigma_proposal(n) ~ sigma_0 / sqrt(n) for Rouse,
+or sigma_0 * n^{(nu-1)/2} for Zimm. This removes the rejection penalty entirely
+and also gets the DISPLACEMENT DISTRIBUTION right (not just the mean).
+
+6.4 Integrating Efficiency into the Cost Function
+
+The efficiency metric should not be combined additively with kinetic fidelity, as
+they have different units and scales. Instead, use a PARETO formulation:
+
+  C_total(alpha) = C_kinetic / eta^alpha
+
+where alpha controls the tradeoff:
+  - alpha = 0: pure kinetic fidelity (ignore efficiency)
+  - alpha = 1: balanced (equal penalty for factor-of-2 kinetic error and
+                         factor-of-2 efficiency loss)
+  - alpha > 1: efficiency-dominated
+
+Alternatively, impose an EFFICIENCY FLOOR: only optimize kinetic fidelity
+subject to eta >= eta_min (e.g., must be at least as efficient as 1/n VMMC):
+
+  C_total = C_kinetic  if  eta >= eta_min
+          = infinity    if  eta < eta_min
+
+The choice of alpha or eta_min is a user preference. For early-stage optimization
+of a new algorithm, use alpha = 0 (get the physics right first). For late-stage
+refinement, use alpha = 1 to prune inefficient variants.
+
+Practical implementation:
+  - Measure eta by counting energy evaluations per step (instrument the code)
+  - Alternatively: measure wall-clock time per 1000 MC cycles (simpler, less portable)
+  - Report eta alongside C_kinetic; let the LLM see both when proposing modifications
+
+--------------------------------------------------------------------------------
+7. THE VMMC FRUSTRATION ISSUE: WEAKLY-BONDED CLUSTERS
+--------------------------------------------------------------------------------
+
+In VMMC (Whitelam-Geissler, J. Chem. Phys. 127, 154101, 2007), cluster growth
+proceeds via "frustrated links": particle j is added to the cluster if translating
+particle i toward its proposed virtual position would BREAK or WEAKEN the i-j
+interaction. The probability of frustrated linkage is:
+
+  p_frustrate(i,j) = max(0, [U(r_ij_after) - U(r_ij_before)] / U(r_ij_before))
+
+(various formulations exist; the key point is that frustration stops cluster growth).
+
+7.1 Strong Bonds (beta * |U_pair| >> 1)
+
+For deeply bonded pairs: moving particle i by displacement d barely changes the
+bond energy if d << sigma_LJ. The frustration probability is small -> cluster
+grows to encompass all bonded neighbors reliably.
+
+With the 1/n rejection: D_cluster ~ D_0/n as required (Rouse reference).
+Conclusion: strongly bonded clusters are handled approximately correctly by the
+1/n scheme, as the user notes.
+
+7.2 Weak Bonds (beta * |U_pair| ~ 1, near the LJ minimum)
+
+For weakly bonded pairs: even a small displacement d significantly changes the
+interaction energy near the inflection points of the LJ potential. Frustration
+probability is O(1) -> cluster propagation is STOPPED before reaching all
+physically bonded particles.
+
+The effective cluster size n_eff < n_physical. This has two competing effects:
+  (a) The moved cluster is smaller -> D_n_eff is closer to physical (smaller error).
+  (b) The non-moved particles lose their correlation with the moved cluster --
+      in physical BD, weakly bonded particles ARE transiently correlated and
+      move partly together.
+
+Is this a problem in practice?
+
+At high temperatures (weak bonds, beta * epsLJ < 1): most bonds are transient,
+typical clusters have n_eff ~ 1--2. The kinetic error is small for all algorithms
+(D_{n~1} is already correct). Weakly bonded cluster fragmentation has minor impact.
+
+At intermediate temperatures (beta * epsLJ ~ 2--3): significant clustering, mixed
+bond strengths. This is where the frustration asymmetry is most consequential. The
+D_n(n) metric (Metric A above) will capture this automatically -- if weakly bonded
+clusters contribute to the measured D_n, and if their D_n is too fast or too slow
+due to incorrect partial propagation, the cost C_A will reflect this.
+
+Assessment: the frustration issue for weak bonds is a SECOND-ORDER effect relative
+to the primary D_n scaling error. It contributes to the cost, but it does not
+require special treatment in the metric design -- the general D_n(n) measurement
+detects it automatically, provided the bond criterion used for cluster assignment
+in the metric (pair energy < threshold) is physically motivated.
+
+Practical recommendation: define "bonded" for metric computation as pair energy
+< -0.1 * epsLJ (or equivalently, d < 1.5 * sigLJ). This includes pairs in the
+LJ well without being too sensitive to thermal fluctuations.
+
+7.3 Implication for the LLM Optimization
+
+The LLM should be aware that improving weakly-bonded cluster propagation is a
+possible route to improving the algorithm. One approach: use the MINIMUM image
+distance (not just energy difference) to decide cluster membership, so that
+geometrically close particles always join the cluster regardless of instantaneous
+energy. This would sacrifice some of the VMMC superdetailed balance properties
+but might give better kinetics for weakly bonded systems.
+
+Whether such modifications preserve DB is automatically checked by the checker.
+
+--------------------------------------------------------------------------------
+8. THE FULL OPTIMIZATION LOOP: ARCHITECTURE
+--------------------------------------------------------------------------------
+
+8.1 Setup Phase (one time)
+
+  1. Fix the physical model parameters: (physLen, epsLJ, numBeta) for 4 state points.
+  2. Run BD reference simulations (LAMMPS Langevin, or custom Python) for each
+     state point. Duration: 10^6 -- 10^7 tau_0 timesteps.
+  3. Compute and store reference metrics:
+       - D_n^ref(n) for n = 1..20
+       - F_s^ref(q,t) for q_mono, q_pair, q_cluster
+       - tau^ref(q), beta^ref(q) from KWW fit
+       - alpha_2^ref(t), tau_NGP^ref
+  4. Compute and store equilibrium cluster statistics:
+       - P(n), mean cluster size, D_0 from single-particle BD
+  5. Generate 1000 equilibrated VMMC configurations per state point (long VMMC run).
+     These are the starting points for all in-loop metric evaluations.
+
+8.2 Optimization Loop (each LLM iteration)
+
+Step 1: LLM proposes Algorithm[] modification in Mathematica.
+
+Step 2: DB check (check.wls, small seed):
+  - If FAIL: return "detailed balance violation" to LLM. Cost = infinity. Loop.
+  - If PASS: continue.
+
+Step 3: Ergodicity check (already part of check.wls):
+  - If FAIL: return "ergodicity violation" to LLM. Cost = infinity. Loop.
+  - If PASS: continue.
+
+Step 4: Rapid kinetic metrics (run on all 4 state points in parallel):
+  - For each state point:
+    a. Start from 100 pre-equilibrated configurations.
+    b. Run K = 200 MC steps from each (K << tau_bond for that T).
+    c. Compute D_n^algo(n) from short-time cluster MSD.
+    d. Run M = 3 * tau^ref(q_cluster) MC steps from each.
+    e. Compute F_s^algo(q_mono, t) and F_s^algo(q_cluster, t).
+    f. Extract tau^algo and beta^algo from KWW fit.
+  - Compute C_A (D_n cost) and C_B_fast (F_s cost at 2 q values).
+  - Compute eta (decorrelation rate, normalized).
+
+Step 5: Return to LLM:
+  - C_fast = w_A * C_A + w_B * C_B_fast
+  - eta (efficiency metric)
+  - Per-state-point breakdown (which conditions are worst)
+  - Top-3 deviating (n, T, rho) combinations (actionable feedback)
+
+Step 6: Every 10th iteration, run full validation:
+  - Compute C_full (all tiers, all q values)
+  - If C_full regressed from previous validation: alert LLM, request explanation.
+
+8.3 Termination Criteria
+
+Stop when:
+  - C_fast < threshold_1 (kinetic fidelity achieved)
+  - eta > threshold_2 (efficiency requirement met)
+  - Both conditions: declare the algorithm "physically faithful and efficient"
+
+OR:
+  - N_iter_max iterations reached without convergence.
+  - Report the Pareto frontier of (C_full, eta) across all tested algorithms.
+
+--------------------------------------------------------------------------------
+9. OTHER IDEAS DISCUSSED THIS SESSION
+--------------------------------------------------------------------------------
+
+9.1 T_phys on the Checker Lattice (small systems, exact)
+
+For the small-system checker (BFS over bit strings), an exact physical transition
+matrix T_phys can be built and compared analytically to T_MC:
+
+  Metric 1 (PhysFidelity M1): eigenvalue spectrum ratio |lambda_2/lambda_3|
+  Metric 2 (PhysFidelity M2): row-normalised KL divergence
+
+  T_phys[i->j] = (1/N) * (1/z) * 1/(1+exp(beta*Delta E))
+    for single-hop transitions (d^2 = 1, same particle type)
+
+This is already implemented in dbc_core.wl and exposed via PhysFidelity=1 in
+check.wls. It is complementary to the large-system approach above: exact for
+small systems, while the BD-based approach is statistical but scales to N=100+.
+
+9.2 Zimm T_phys with Cluster Translations
+
+The checker's T_phys can be extended to include correlated cluster moves
+(Zimm dynamics):
+
+  T_Zimm[si->sj] = (1/z) * n^(nu-1) * 1/(1+exp(beta*Delta E))
+    for simultaneous translation of a connected cluster of n particles
+
+Implementation: BuildTZimm[allStates, energyFn, numBeta, nu, bondCutoff] in
+dbc_core.wl. Identifies connected clusters by BFS on the bond graph, enumerates
+4-directional translations, assigns Zimm-scaled rates.
+
+This gives an exact, computable reference for cluster dynamics on small lattices.
+
+9.3 Variable Proposal Width: sigma(n) Instead of Rejection
+
+The 1/n rejection scheme achieves D_n = D_0/n by accepting 1/n of all cluster
+moves. An alternative (and more efficient) approach:
+
+  sigma_proposal(n) = sigma_0 / sqrt(n)      [Rouse]
+  sigma_proposal(n) = sigma_0 * n^{(nu-1)/2} [Zimm]
+
+This gives the correct D_n WITHOUT rejections:
+  D_n = sigma(n)^2 * p_acc / (2*d*delta_t) = sigma_0^2/n * p_acc/(2d*delta_t) = D_0/n
+
+It also gets the DISPLACEMENT DISTRIBUTION correct (Gaussian with n-dependent width)
+rather than just the mean. This is physically correct: in Rouse dynamics, a cluster
+of n particles makes diffusive steps smaller by 1/sqrt(n) at each timestep.
+
+Computational cost: same as VMMC (no extra rejection), but cluster propagation still
+scales as O(n). Net efficiency: same acceptance rate as single-particle MC (for Rouse),
+but decorrelation at D_0/n rate -- modest acceleration for large clusters.
+
+For Zimm: sigma_0 * n^{(nu-1)/2} ~ sigma_0 * n^{-0.2} for nu=0.588. Larger moves
+for larger clusters than Rouse, but still decelerating. More efficient than 1/n
+rejection for Zimm.
+
+9.4 Dynamic Structure Factor S(q, omega) as Full Spectral Comparison
+
+Rather than just the peak of F_s(q,t), compute the full dynamic structure factor:
+
+  S(q, omega) = Fourier transform of F_s(q,t) over time
+
+This gives a spectral representation of dynamics. The shape of S(q,omega) -- whether
+it is a Lorentzian (simple diffusion), Cole-Davidson, or power-law shape -- encodes
+the full distribution of relaxation timescales. An algorithm must reproduce the SHAPE
+of S(q,omega), not just the peak position, to be a faithful kinetic model.
+
+Cost: requires longer simulations; most useful for full validation, not in-loop.
+
+9.5 MPCD/SRD as the Ultimate Hydrodynamic Ground Truth
+
+For dilute solutions where Zimm dynamics is the target (HI unscreened), the most
+principled ground truth is Multi-Particle Collision Dynamics (MPCD/SRD):
+
+  - Explicit coarse-grained solvent particles + embedded polymer beads
+  - HI emerge naturally from local momentum conservation
+  - Transitions between Zimm (dilute) and Rouse (concentrated) are automatic
+  - No HI screening parameter to tune: the physics does it
+
+Software: ESPResSo (espressomd.mpcd module). Cite: Ripoll, Winkler, Gompper,
+Eur. Phys. J. E 23, 349 (2007).
+
+Computational cost: O(10x) more expensive than Langevin BD for same N and t_sim.
+Appropriate for ground truth generation (one-time), not in-loop comparison.
+
+9.6 Spectral Comparison of T_MC to T_phys (PhysFidelity Metrics M1, M2)
+
+The PhysFidelity=1 flag in check.wls gives:
+  - M1: deviation of eigenvalue ratio from physical (relaxation hierarchy)
+  - M2: row-normalised KL divergence (fidelity score)
+
+These are exact for small systems and complement the statistical D_n(n) approach
+for large systems. They test the transition matrix directly, without MC simulation,
+making them fast and noise-free. Useful for early-stage algorithm screening before
+committing to full BD comparison.
+
+9.7 Van Hove Functions as Full Distribution Tests
+
+The MSD gives only the mean of the displacement distribution. The self Van Hove:
+
+  G_s(r, t) = (1/N) sum_i <delta(r - |r_i(t) - r_i(0)|)>
+
+gives the FULL displacement distribution at time t. It is Gaussian for simple
+Brownian motion, and develops exponential tails (non-Gaussian) for heterogeneous
+dynamics (some particles trapped in clusters, others free).
+
+If VMMC artificially accelerates large clusters, it will underestimate the fraction
+of particles with small displacements (trapped) at intermediate times -- a detectable
+signature in G_s(r,t) that MSD alone would miss.
+
+Comparison: Hellinger distance H^2(G_s^algo, G_s^ref) at t = tau_alpha.
+Computationally cheap to measure; add to full validation suite.
+
+9.8 Non-Equilibrium Relaxation as a Calibration Test
+
+Instead of comparing equilibrium dynamics, compare how fast each algorithm relaxes
+to equilibrium from a known non-equilibrium starting configuration:
+
+  1. Prepare an ordered initial state (all particles on a sublattice, or one large cluster)
+  2. Run BD and VMMC from the same initial state
+  3. Compare P(n,t), g(r,t), MSD(t) along the relaxation pathway
+
+This is more sensitive to large-scale collective rearrangements than equilibrium
+measurements, because non-equilibrium relaxation depends on the entire trajectory
+through configuration space, not just local fluctuations.
+
+Practical note: results depend on the specific non-equilibrium starting point chosen;
+a robust test uses multiple starting states spanning the relevant timescale hierarchy.
+
+--------------------------------------------------------------------------------
+10. REFERENCES
+--------------------------------------------------------------------------------
+
+Core dynamics:
+  Rouse, P.E. (1953) J. Chem. Phys. 21, 1272. [Rouse model]
+  Zimm, B.H. (1956) J. Chem. Phys. 24, 269. [Zimm model with HI]
+  Doi, M. & Edwards, S.F. (1988) "The Theory of Polymer Dynamics," Oxford.
+  Hansen, J.P. & McDonald, I.R. (2013) "Theory of Simple Liquids," 4th ed.
+
+VMMC:
+  Whitelam, S. & Geissler, P.L. (2007) J. Chem. Phys. 127, 154101.
+    [Original VMMC; superdetailed balance; frustration mechanism]
+  Whitelam, S. et al. (2009) J. Chem. Phys. 130, 148101.
+    [VMMC kinetics; cluster diffusion discussion]
+
+MC time conventions:
+  Bortz, Kalos & Lebowitz (1975) J. Comput. Phys. 17, 10.
+    [N-fold way / kinetic MC time]
+  Voter, A.F. (1986) Phys. Rev. B 34, 6819.
+    [Variable time-step kinetic MC]
+  Sanz, E. & Marenduzzo, D. (2010) J. Chem. Phys. 132, 194102.
+    [MC vs BD comparison; time calibration for colloidal MC]
+
+Physical observables:
+  Kob, W. & Andersen, H.C. (1995) Phys. Rev. E 51, 4626.
+    [F_s(q,t), non-Gaussian parameter for glass-forming liquids]
+  Boon, J.P. & Yip, S. (1980) "Molecular Hydrodynamics," McGraw-Hill.
+    [van Hove functions, dynamic structure factor]
+  van Hove, L. (1954) Phys. Rev. 95, 249.
+    [Original van Hove correlation function formulation]
+  Banchio, A.J. & Brady, J.F. (2003) J. Chem. Phys. 118, 10323.
+    [F_s(q,t) for colloidal suspensions with and without HI]
+
+Hydrodynamic interactions:
+  Rotne, J. & Prager, S. (1969) J. Chem. Phys. 50, 4831.
+    [RPY mobility tensor]
+  Yamakawa, H. (1970) J. Chem. Phys. 53, 436.
+    [Yamakawa extension of RPY tensor]
+  Dhont, J.K.G. (1996) "An Introduction to Dynamics of Colloids," Elsevier.
+
+MPCD:
+  Malevanets, A. & Kapral, R. (1999) J. Chem. Phys. 110, 8605. [SRD algorithm]
+  Ripoll, M., Winkler, R.G. & Gompper, G. (2007) Eur. Phys. J. E 23, 349.
+    [MPCD for polymer dynamics; Rouse-to-Zimm crossover]
+  Weik, F. et al. (2019) Eur. Phys. J. Special Topics 227, 1789. [ESPResSo]
+
+Software:
+  Thompson, A.P. et al. (2022) Comput. Phys. Commun. 271, 108171. [LAMMPS]
+  Ramasubramani, V. et al. (2020) Comput. Phys. Commun. 254, 107275. [freud]
+  Michaud-Agrawal, N. et al. (2011) J. Comput. Chem. 32, 2319. [MDAnalysis]
+  Eastman, P. et al. (2017) PLOS Comput. Biol. 13, e1005659. [OpenMM]
+
+================================================================================
+END OF DOCUMENT
+================================================================================

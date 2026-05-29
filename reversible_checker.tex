@@ -1,0 +1,218 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{parskip}
+
+\title{\textbf{Detailed Balance, Logical Reversibility, and the Limits\\of Reversible Computation as a Correctness Checker}}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\section{Background: Detailed Balance and Microscopic Reversibility}
+
+A discrete-time Markov chain on state space $X$ with transition kernel $P$ and stationary
+distribution $\pi$ satisfies \emph{detailed balance} (DB) if
+\begin{equation}
+  \pi(x)\,P(x \to y) \;=\; \pi(y)\,P(y \to x) \qquad \forall\, x,y \in X.
+  \label{eq:db}
+\end{equation}
+Equation~\eqref{eq:db} is the discrete analogue of microscopic reversibility: every forward
+transition is exactly balanced by its time-reverse, so no net probability current circulates
+between any pair of states.  DB is sufficient (and, for irreducible chains, necessary) for $\pi$
+to be the equilibrium distribution, and it is the standard correctness condition for Markov chain
+Monte Carlo (MCMC) samplers \cite{hastings1970, kelly1979}.
+
+A system respecting DB admits no ``Maxwell's demon''---an agent that exploits observed transitions
+to extract work.  Szilard \cite{szilard1929} formalised the demon; Landauer \cite{landauer1961}
+showed that \emph{erasure} of one bit of information necessarily dissipates at least $kT\ln 2$ of
+heat; Bennett \cite{bennett1973,bennett1982} completed the resolution by showing that the demon's
+ledger must be erased to close its thermodynamic cycle, and that erasure---not measurement---is the
+true entropic cost.  For a system at DB, the demon's ledger accumulates only random, unexploitable
+information: the equilibrium symmetry of DB is precisely what prevents systematic work extraction.
+
+\section{Logical Reversibility and Its Relation to Detailed Balance}
+
+Consider a simulation of the chain whose full machine state at time $t$ is
+$\Sigma_t = (x_t, \rho_t, \mathrm{aux}_t)$, where $x_t$ is the system state, $\rho_t$ is the
+pseudo-random number generator (PRNG) state, and $\mathrm{aux}_t$ covers stack frames and
+temporaries.  With a deterministic (seeded) PRNG the simulation executes a deterministic map
+$f\colon\Sigma_t \mapsto \Sigma_{t+1}$.  A computation is \emph{logically reversible}
+\cite{bennett1973} if and only if $f$ is a bijection: the output uniquely determines the input,
+so no information is erased.
+
+Many standard PRNGs (LCGs, xorshift) are bijections on their state space, so $\rho_t \to
+\rho_{t+1}$ is invertible.  For a Metropolis--Hastings step with additive proposal
+$y = x_t + \xi(\rho_t)$, the full map $(x_t,\rho_t)\mapsto(x_{t+1},\rho_{t+1})$ is also a
+bijection: in the acceptance case $x_t = x_{t+1} - \xi$ is recoverable; in the rejection case
+$x_t = x_{t+1}$ is recovered by verifying the rejected proposal.  Such a simulation is therefore
+natively logically reversible, without recourse to the costly Bennett three-tape
+construction \cite{bennett1989}.
+
+A natural question is whether logical reversibility (bijectivity of $f$) is equivalent to DB.
+\textbf{The answer is no}---the two properties are independent:
+\begin{itemize}
+  \item \textit{DB without logical reversibility.}  Any correct Metropolis--Hastings
+        implementation that discards unused random variates satisfies DB but performs logically
+        irreversible operations (the discarded bits are erased).
+  \item \textit{Logical reversibility without DB.}  The deterministic cyclic chain
+        $0\to1\to2\to0$ is trivially bijective (and compiles cleanly into any reversible language)
+        yet violates DB because $P(0\to1)=1$ while $P(1\to0)=0$.
+\end{itemize}
+Logical reversibility and DB address different levels: bijectivity constrains the deterministic
+map $f$; DB constrains the probability measure that $f$ induces on the system-state marginal.
+
+\subsection*{Can all DB simulations be implemented reversibly?}
+
+Yes.  Bennett \cite{bennett1973,bennett1989} proved that any Turing-machine computation can be
+simulated by a reversible Turing machine with at most $O(T^{1+\varepsilon})$ time overhead and
+$O(S\log T)$ space overhead via pebbling strategies; Lecerf \cite{lecerf1963} independently
+established the existence of reversible Turing machines.  Because a correctly-implemented DB
+simulation is already a bijection on $(x,\rho)$ (as argued above), the Bennett overhead is
+typically unnecessary.
+
+\section{Reversible Programming Languages and the Involution Condition}
+
+Several reversible programming languages enforce bijectivity at the language level.  Janus
+\cite{lutz1982, yokoyama2007}, the canonical example, requires all state updates to be
+invertible (e.g.\ \texttt{x += e} rather than \texttt{x := e}), enforces zero-clearance on
+variable deallocation, and provides \texttt{call}/\texttt{uncall} for procedures and their
+inverses.  Related systems include Theseus \cite{james2014}, based on type isomorphisms, and
+conservative logic \cite{fredkin1982}, where every gate preserves the Hamming weight of its
+inputs.  These languages prevent accidental information erasure and make the inverse computation
+explicit---but, as the cyclic-chain counterexample shows, they do \emph{not} guarantee DB.
+
+\subsection*{Does randomising memory close the gap?}
+
+One might hope that initialising all machine bits (including those encoding $\pi$) uniformly at
+random would force both transition directions to occur equally, thereby restoring DB.  However,
+the transition direction is determined by the \emph{structure} of $f$, not by the values it acts
+on.  For the cyclic chain $f\bigl((x,\mathrm{aux})\bigr)=\bigl((x+1)\bmod 3,\,\mathrm{aux}\bigr)$,
+the counts of $0\!\to\!1$ transitions equal $M = |\mathrm{Aux}|$ while $1\!\to\!0$ transitions
+remain zero, regardless of how $\mathrm{aux}$ is distributed.  Memory randomisation does not
+change $f$.
+
+\subsection*{The involution condition}
+
+The condition that \emph{does} provide a structural DB guarantee is not bijectivity but
+\emph{involution}: $f^2 = \mathrm{id}$, i.e.\ $f = f^{-1}$.  For an involutory $f$ and any
+distribution $\mu$ on $\Sigma$, the map $\sigma\mapsto f(\sigma)$ is a bijection between
+$\{\sigma : x(\sigma)=x,\,x(f(\sigma))=y\}$ and $\{\sigma : x(\sigma)=y,\,x(f(\sigma))=x\}$,
+so these sets have equal cardinality.  With $\pi(x)\propto|\{\sigma:x(\sigma)=x\}|$ this gives
+DB on the marginal immediately.
+
+This is the hidden structure of Metropolis--Hastings: Tierney \cite{tierney1998} showed that the
+MH step can be written as an involution on the extended state $(x,y,u)$ (current state, proposal,
+acceptance variate).  The momentum flip in Hamiltonian Monte Carlo \cite{duane1987} serves
+exactly the same role---without it the leapfrog map is merely a bijection and HMC violates DB;
+with it the map becomes an involution and DB is restored.
+Neklyudov et al.\ \cite{neklyudov2020} formalise this as \emph{involutive MCMC}, showing that any
+measure-preserving involution on an extended state space defines a valid DB kernel, and that
+virtually all correct MCMC algorithms are instances of this construction.
+
+The hierarchy is therefore:
+\[
+  \underbrace{\text{bijection}}_{\text{reversible language}} \;\subsetneq\;
+  \underbrace{\text{involution} + \text{uniform aux}}_{\text{structural DB guarantee}} \;\subsetneq\;
+  \underbrace{\text{correct acceptance ratio w.r.t.\ }\pi}_{\text{DB for target }\pi}.
+\]
+A reversible language enforces only the first level.  An involution requirement would enforce the
+second, yielding DB with respect to the \emph{uniform} distribution over states---but not with
+respect to an arbitrary target $\pi$.  For DB with a prescribed $\pi$, the acceptance
+probabilities must be correctly computed relative to $\pi$; this is an algorithmic guarantee,
+not a linguistic one.  Probabilistic programming languages such as Hakaru \cite{narayanan2016},
+which represent distributions as types and synthesise DB-correct kernels via symbolic
+disintegration, approach this goal from the opposite direction: specify $\pi$, derive $T$.
+
+\section*{Conclusion}
+
+Logical reversibility of the full machine state (bijectivity of $f$) is a necessary but not
+sufficient condition for detailed balance.  It prevents accidental information erasure, makes the
+inverse step explicit, and is the computational analogue of Liouville's theorem.  The condition
+that structurally guarantees DB is involution ($f^2=\mathrm{id}$) of the extended-state map,
+which is precisely the hidden invariant shared by Metropolis--Hastings, HMC, and other correct
+MCMC methods.  Reversible programming languages enforce bijectivity but not involution; a language
+that guaranteed DB would need to enforce the involution condition and carry the target distribution
+$\pi$ in its type system---neither of which is a feature of current reversible languages.
+
+\begin{thebibliography}{99}
+
+\bibitem{szilard1929}
+Szilard, L.\ (1929). \"{U}ber die Entropieverminderung in einem thermodynamischen System bei
+Eingriffen intelligenter Wesen. \textit{Zeitschrift f\"{u}r Physik}, 53, 840--856.
+
+\bibitem{landauer1961}
+Landauer, R.\ (1961). Irreversibility and heat generation in the computing process.
+\textit{IBM Journal of Research and Development}, 5(3), 183--191.
+
+\bibitem{lecerf1963}
+Lecerf, Y.\ (1963). Machines de Turing r\'{e}versibles. \textit{Comptes Rendus de l'Acad\'{e}mie
+des Sciences}, 257, 2597--2600.
+
+\bibitem{bennett1973}
+Bennett, C.\ H.\ (1973). Logical reversibility of computation.
+\textit{IBM Journal of Research and Development}, 17(6), 525--532.
+
+\bibitem{hastings1970}
+Hastings, W.\ K.\ (1970). Monte Carlo sampling methods using Markov chains and their applications.
+\textit{Biometrika}, 57(1), 97--109.
+
+\bibitem{fredkin1982}
+Fredkin, E.\ \& Toffoli, T.\ (1982). Conservative logic.
+\textit{International Journal of Theoretical Physics}, 21(3--4), 219--253.
+
+\bibitem{lutz1982}
+Lutz, C.\ \& Derby, H.\ (1982). Janus: A time-reversible language. Caltech memorandum.
+
+\bibitem{bennett1982}
+Bennett, C.\ H.\ (1982). The thermodynamics of computation---a review.
+\textit{International Journal of Theoretical Physics}, 21(12), 905--940.
+
+\bibitem{kelly1979}
+Kelly, F.\ P.\ (1979). \textit{Reversibility and Stochastic Networks}. Wiley, Chichester.
+
+\bibitem{duane1987}
+Duane, S., Kennedy, A.\ D., Pendleton, B.\ J., \& Roweth, D.\ (1987). Hybrid Monte Carlo.
+\textit{Physics Letters B}, 195(2), 216--222.
+
+\bibitem{bennett1989}
+Bennett, C.\ H.\ (1989). Time/space trade-offs for reversible computation.
+\textit{SIAM Journal on Computing}, 18(4), 766--776.
+
+\bibitem{tierney1998}
+Tierney, L.\ (1998). A note on Metropolis--Hastings kernels for general state spaces.
+\textit{Annals of Applied Probability}, 8(1), 1--9.
+
+\bibitem{crooks1999}
+Crooks, G.\ E.\ (1999). Entropy production fluctuation theorem and the nonequilibrium work
+relation for free energy differences. \textit{Physical Review E}, 60(3), 2721--2726.
+
+\bibitem{yokoyama2007}
+Yokoyama, T.\ \& Gl\"{u}ck, R.\ (2007). A reversible programming language and its invertible
+self-interpreter. \textit{Proceedings of PEPM 2007}, ACM, 144--153.
+
+\bibitem{james2014}
+James, R.\ P.\ \& Sabry, A.\ (2014). Theseus: A high level language for reversible computing.
+Workshop on Reversible Computation.
+
+\bibitem{narayanan2016}
+Narayanan, P., Carette, J., Romano, W., Shan, C., \& Zinkov, R.\ (2016).
+Probabilistic inference by program transformation in Hakaru.
+\textit{Proceedings of FLOPS 2016}, Springer, 62--79.
+
+\bibitem{neklyudov2020}
+Neklyudov, K., Welling, M., Egorov, E., \& Vetrov, D.\ (2020).
+Involutive MCMC: a unifying framework.
+\textit{Proceedings of ICML 2020}, PMLR, 7273--7282.
+
+\bibitem{parrondo2015}
+Parrondo, J.\ M.\ R., Horowitz, J.\ M., \& Sagawa, T.\ (2015).
+Thermodynamics of information. \textit{Nature Physics}, 11, 131--139.
+
+\end{thebibliography}
+
+\end{document}

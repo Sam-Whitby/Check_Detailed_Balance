@@ -1,0 +1,174 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{Metropolis1953}
+\citation{Frenkel2002}
+\citation{Allen1987}
+\citation{Levin2009}
+\citation{Newman1999}
+\citation{Geweke2004}
+\citation{Hastings1970}
+\citation{Whitelam2007}
+\citation{Whitelam2009}
+\citation{SwendsenWang1987}
+\citation{Wolff1989}
+\citation{Kelly1979}
+\citation{Norris1998}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{eq:db}{{1}{1}{Introduction}{equation.1.1}{}}
+\citation{Newman1999}
+\citation{Geweke2004}
+\citation{Daws2004}
+\citation{Kwiatkowska2011}
+\citation{Dehnert2017}
+\citation{Gehr2016}
+\citation{Manousiouthakis1999}
+\citation{Bernard2009}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:related}{{2}{2}{Related Work}{section.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Theoretical Framework}{2}{section.3}\protected@file@percent }
+\newlabel{sec:method}{{3}{2}{Theoretical Framework}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Problem formulation}{2}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}State enumeration via \textsc  {BitsToState}}{2}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:bitstostate}{{3.2}{2}{State enumeration via \textsc {BitsToState}}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Reducing randomness to a binary tape}{2}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:bits}{{3.3}{2}{Reducing randomness to a binary tape}{subsection.3.3}{}}
+\newlabel{eq:normalbin}{{3}{3}{Reducing randomness to a binary tape}{equation.3.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}BFS construction of the transition matrix}{3}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:bfs}{{3.4}{3}{BFS construction of the transition matrix}{subsection.3.4}{}}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Symbolic transition-matrix construction (BFS)}}{3}{algorithm.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{alg:bfs}{{1}{3}{Symbolic transition-matrix construction (BFS)}{algorithm.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Detailed balance verification}{3}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:dbcheck}{{3.5}{3}{Detailed balance verification}{subsection.3.5}{}}
+\newlabel{eq:check}{{4}{3}{Detailed balance verification}{equation.3.4}{}}
+\newlabel{eq:fast}{{5}{4}{Detailed balance verification}{equation.3.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}Symmetry-aware checking}{4}{subsection.3.6}\protected@file@percent }
+\newlabel{sec:symmetry}{{3.6}{4}{Symmetry-aware checking}{subsection.3.6}{}}
+\citation{HornJohnson1985}
+\citation{Glauber1963}
+\citation{Turing1936}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Safety guarantees for symmetry-aware checking. The DB check result is always correct. G-invariance failure warns that the declared symmetry is wrong; it does not produce false DB results.}}{5}{table.caption.2}\protected@file@percent }
+\newlabel{tab:symmetry}{{1}{5}{Safety guarantees for symmetry-aware checking. The DB check result is always correct. G-invariance failure warns that the declared symmetry is wrong; it does not produce false DB results}{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}Ergodicity checking}{5}{subsection.3.7}\protected@file@percent }
+\newlabel{sec:ergodicity}{{3.7}{5}{Ergodicity checking}{subsection.3.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8}Physical fidelity metrics}{5}{subsection.3.8}\protected@file@percent }
+\newlabel{sec:fidelity}{{3.8}{5}{Physical fidelity metrics}{subsection.3.8}{}}
+\newlabel{eq:glauber}{{6}{5}{Physical fidelity metrics}{equation.3.6}{}}
+\newlabel{eq:M1}{{7}{5}{Physical fidelity metrics}{equation.3.7}{}}
+\newlabel{eq:M2}{{8}{5}{Physical fidelity metrics}{equation.3.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.9}Limitations}{5}{subsection.3.9}\protected@file@percent }
+\newlabel{sec:limitations}{{3.9}{5}{Limitations}{subsection.3.9}{}}
+\citation{Gowda2021}
+\citation{Cassette}
+\citation{Meurer2017}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Known failure modes. False negatives are cases where a broken algorithm passes; false positives are cases where a correct algorithm fails. Most risks are mitigated by design choices or warnings.}}{6}{table.caption.3}\protected@file@percent }
+\newlabel{tab:failmodes}{{2}{6}{Known failure modes. False negatives are cases where a broken algorithm passes; false positives are cases where a correct algorithm fails. Most risks are mitigated by design choices or warnings}{table.caption.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Computational Implementation}{6}{section.4}\protected@file@percent }
+\newlabel{sec:mma}{{4}{6}{Computational Implementation}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Mathematica as the host language}{6}{subsection.4.1}\protected@file@percent }
+\newlabel{sec:why-mma}{{4.1}{6}{Mathematica as the host language}{subsection.4.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Computational cost and parallelisation}{6}{subsection.4.2}\protected@file@percent }
+\newlabel{sec:parallel}{{4.2}{6}{Computational cost and parallelisation}{subsection.4.2}{}}
+\citation{Kawasaki1966}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Estimated runtimes for the \texttt  {vmmc\_lattice.wl} 504-state component at \texttt  {NGrid=3} on 4 kernels, as a function of symmetry exploitation. FS = FullSimplify calls; estimates scale linearly from measured 12.5\,min at no-symmetry.}}{7}{table.caption.4}\protected@file@percent }
+\newlabel{tab:symtimes}{{3}{7}{Estimated runtimes for the \texttt {vmmc\_lattice.wl} 504-state component at \texttt {NGrid=3} on 4 kernels, as a function of symmetry exploitation. FS = FullSimplify calls; estimates scale linearly from measured 12.5\,min at no-symmetry}{table.caption.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}User interface and algorithm files}{7}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:interface}{{4.3}{7}{User interface and algorithm files}{subsection.4.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Results}{7}{section.5}\protected@file@percent }
+\newlabel{sec:examples}{{5}{7}{Results}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}1D Kawasaki dynamics on a ring}{7}{subsection.5.1}\protected@file@percent }
+\newlabel{sec:kawasaki}{{5.1}{7}{1D Kawasaki dynamics on a ring}{subsection.5.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Representative symbolic transition matrix entries for the 4-site 1D Kawasaki ring ($L{=}4$, particles of types 1 and 2). States shown as periodic lattice rows \fbox  {\ensuremath  {\,\cdot \,}}\fbox  {\ensuremath  {\,\cdot \,}}\fbox  {\ensuremath  {\,\cdot \,}}\fbox  {\ensuremath  {\,\cdot \,}}. All non-zero off-diagonal entries follow the same pattern.}}{7}{table.caption.5}\protected@file@percent }
+\newlabel{tab:kawmat}{{4}{7}{Representative symbolic transition matrix entries for the 4-site 1D Kawasaki ring ($L{=}4$, particles of types 1 and 2). States shown as periodic lattice rows \lsite {\cdot }\lsite {\cdot }\lsite {\cdot }\lsite {\cdot }. All non-zero off-diagonal entries follow the same pattern}{table.caption.5}{}}
+\newlabel{eq:kawenergy}{{9}{7}{1D Kawasaki dynamics on a ring}{equation.5.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Rightward-only cluster: a false negative in numerical testing}{7}{subsection.5.2}\protected@file@percent }
+\newlabel{sec:cluster}{{5.2}{7}{Rightward-only cluster: a false negative in numerical testing}{subsection.5.2}{}}
+\citation{Whitelam2007}
+\citation{Whitelam2007}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Checker output (Mode=Both) for the rightward-only 1D cluster algorithm. \#St: component size. Sym: symbolic result. \#F: violated ordered pairs. KL: Kullback--Leibler divergence from Boltzmann (100\,000 steps). Dash: single-state component.}}{8}{table.caption.6}\protected@file@percent }
+\newlabel{tab:cluster}{{5}{8}{Checker output (Mode=Both) for the rightward-only 1D cluster algorithm. \#St: component size. Sym: symbolic result. \#F: violated ordered pairs. KL: Kullback--Leibler divergence from Boltzmann (100\,000 steps). Dash: single-state component}{table.caption.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}2D Virtual Move Monte Carlo}{8}{subsection.5.3}\protected@file@percent }
+\newlabel{sec:vmmc}{{5.3}{8}{2D Virtual Move Monte Carlo}{subsection.5.3}{}}
+\newlabel{eq:plink}{{11}{8}{2D Virtual Move Monte Carlo}{equation.5.11}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}Symmetry-aware checking at NGrid=3}{8}{subsection.5.4}\protected@file@percent }
+\newlabel{sec:sym-example}{{5.4}{8}{Symmetry-aware checking at NGrid=3}{subsection.5.4}{}}
+\citation{FunSearch2023}
+\citation{AlphaEvolve2025}
+\citation{PAL2023}
+\citation{ReAct2023}
+\citation{Reflexion2023}
+\citation{LLMLOOP2025}
+\citation{Bernard2009}
+\citation{FunSearch2023}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Intended Use Cases}{9}{section.6}\protected@file@percent }
+\newlabel{sec:usecases}{{6}{9}{Intended Use Cases}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Verification and regression testing}{9}{subsection.6.1}\protected@file@percent }
+\newlabel{sec:uc-regression}{{6.1}{9}{Verification and regression testing}{subsection.6.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Algorithm development: design, certify, translate}{9}{subsection.6.2}\protected@file@percent }
+\newlabel{sec:uc-design}{{6.2}{9}{Algorithm development: design, certify, translate}{subsection.6.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}LLM-assisted algorithm discovery}{9}{subsection.6.3}\protected@file@percent }
+\newlabel{sec:uc-llm}{{6.3}{9}{LLM-assisted algorithm discovery}{subsection.6.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Physical kinetics characterisation}{10}{subsection.6.4}\protected@file@percent }
+\newlabel{sec:uc-kinetics}{{6.4}{10}{Physical kinetics characterisation}{subsection.6.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Discussion}{10}{section.7}\protected@file@percent }
+\newlabel{sec:discussion}{{7}{10}{Discussion}{section.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Conclusions}{10}{section.8}\protected@file@percent }
+\newlabel{sec:conclusion}{{8}{10}{Conclusions}{section.8}{}}
+\bibcite{Metropolis1953}{1}
+\bibcite{Hastings1970}{2}
+\bibcite{Frenkel2002}{3}
+\bibcite{Allen1987}{4}
+\bibcite{Newman1999}{5}
+\bibcite{Levin2009}{6}
+\bibcite{Kawasaki1966}{7}
+\bibcite{Whitelam2007}{8}
+\bibcite{Whitelam2009}{9}
+\bibcite{SwendsenWang1987}{10}
+\bibcite{Wolff1989}{11}
+\bibcite{LiuLuijten2004}{12}
+\@writefile{toc}{\contentsline {section}{\numberline {A}BitsToState: bijective state enumeration}{11}{appendix.A}\protected@file@percent }
+\newlabel{app:bitstostate}{{A}{11}{BitsToState: bijective state enumeration}{appendix.A}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {B}Supported random call types}{11}{appendix.B}\protected@file@percent }
+\newlabel{app:random}{{B}{11}{Supported random call types}{appendix.B}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Random call types supported by the checker and their reduction to the binary tape.}}{11}{table.caption.7}\protected@file@percent }
+\newlabel{tab:random}{{6}{11}{Random call types supported by the checker and their reduction to the binary tape}{table.caption.7}{}}
+\bibcite{Geweke2004}{13}
+\bibcite{Kelly1979}{14}
+\bibcite{Norris1998}{15}
+\bibcite{Manousiouthakis1999}{16}
+\bibcite{Bernard2009}{17}
+\bibcite{Glauber1963}{18}
+\bibcite{Turing1936}{19}
+\bibcite{HornJohnson1985}{20}
+\bibcite{Daws2004}{21}
+\bibcite{Kwiatkowska2011}{22}
+\bibcite{Dehnert2017}{23}
+\bibcite{Gehr2016}{24}
+\bibcite{Meurer2017}{25}
+\bibcite{Bezanson2017}{26}
+\bibcite{Gowda2021}{27}
+\bibcite{Cassette}{28}
+\bibcite{Mathematica}{29}
+\bibcite{FunSearch2023}{30}
+\bibcite{AlphaEvolve2025}{31}
+\bibcite{PAL2023}{32}
+\bibcite{ReAct2023}{33}
+\bibcite{Reflexion2023}{34}
+\bibcite{LLMLOOP2025}{35}
+\bibcite{Siepmann1992}{36}
+\bibcite{Hedges2015}{37}
+\bibcite{WolframClient}{38}
+\gdef \@abspage@last{12}

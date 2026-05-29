@@ -1,0 +1,51 @@
+The current code is O(nGrid^2) per step and O(nGrid^4) or O(nGrid^2) for initial setup, which is way too expensive. I need to implement all four fixes across the Mathematica files. For vmmc_continuous.wl, I'll rewrite $neighborsD2, $uniqueBondsExt, and the energy function to use displacement-based computation. For animate.wls, I'll add maxD2 as a recognized option. Let me start implementing these changes.
+
+Writing the fixed code... The # =!= s condition filters out the center point, which is good since $applyDir with zero displacement returns the original site. I'm checking the efficiency: for small cutoff distances like maxD2=1 or maxD2=8, this generates only 8 or 48 candidates respectively, each requiring one distance computation—far better than checking all nGrid² sites. Though I'm noticing potential duplicates could arise from the wrapping behavior on small grids, where different displacements might map to the same neighbor after applying the torus topology.
+
+Defining the optimized function... I'm realizing that DeleteDuplicates @ Sort handles the redundancy issue—the same bond can emerge from multiple (s, dr, dc) combinations, like bond {1, 2} appearing when s=1 with direction {0, 1} and again when s=2 with direction {0, -1}, but the deduplication step collapses these into a single entry. On a finite torus, different displacement vectors can lead to the same target site with the same minimum distance, so DeleteDuplicates removes those redundant bond entries. Sort isn't strictly necessary for DeleteDuplicates to work, but it does help ensure consistent ordering.
+
+For large lattices where wrapping doesn't occur, the s < q condition naturally prevents duplicates, so DeleteDuplicates is really just a safeguard for small systems. I'll keep it for correctness.
+
+Defining the energy function... the filter keeps only pairs within the distance threshold. For a concrete example with a 3×3 grid, when state = {1, 2, 0, 0, 0, 0, 0, 0, 0} and occupied sites are {1, 2}, the loop computes the torus distance between them and looks up the coupling strength—returning a single couplingJ[1, 2, 1] term. The old approach using a precomputed bond list would iterate through 36 bonds for the same grid, with most returning zero.
+
+The key insight is that both methods are semantically equivalent: with $maxD2=Infinity, all particle pairs are included since the distance condition is always satisfied, so the energy correctly sums over all pairs. The new sparse approach is more efficient because it only computes distances for occupied sites rather than checking every possible bond.
+
+Now I'm weighing the performance tradeoff between the two approaches. The bond-list method requires O(nGrid²) setup and per-call overhead, while the particle-sparse approach does O(N²) distance calculations on-the-fly without memoization. For N=9 particles on a 400-site grid, the sparse approach avoids the upfront cost but recalculates distances repeatedly during energy evaluations.
+
+The key insight is that $torusD2 computes the minimum distance on a torus by taking the absolute difference in row and column indices, then wrapping around the grid boundaries...
+
+Finishing the distance calculation...
+
+For N=9, the particle-sparse approach runs about 360 arithmetic operations per energy evaluation, while the bond-list method with maxD2=8 requires roughly 4,840 operations—making the particle-sparse version about 13 times faster for this configuration.
+
+The key improvements from fixing the code are substantial: constructing the unique bonds now scales as O(Sites × maxD2) instead of O(nGrid^4), building neighbor lists per site drops to O(maxD2) rather than O(nGrid^2), and energy calculations become O(N^2) pairs instead of O(nGrid^2) bonds. For sparse particle systems, this makes VMMC cost per step scale with cluster size and local neighbor count, completely decoupling it from the grid size.
+
+Now I need to implement these fixes in the actual code files and add maxD2 as a recognized option. But I'm realizing the $torusD2 function itself has a hidden inefficiency—it calls helper functions to compute row and column indices, and these aren't memoized, so every distance calculation repeats the same arithmetic operations.
+
+For the current problem size of 9 particles this is negligible, but I should verify that $vmmcBuildCluster doesn't have any remaining quadratic dependencies after fixing $neighborsD2. Looking at the cluster-building logic, each particle lookup now returns only O(r²) neighbors instead of scanning the entire grid, so the overall complexity should scale properly with particle count rather than lattice size.
+
+The union of neighbor shells across three positions gives O(r²) entries, and evaluating pair energies for each is constant time, so the total cluster build is O(N × r²). Combined with the O(N²) energy calculation, each VMMC step costs around 522 operations for N=9—completely independent of grid size. Now I'm ready to implement this.
+
+I need to make three fixes in vmmc_continuous.wl and one in animate.wls. The $torusD2 function isn't memoized, but since $neighborsD2 is memoized after the first call, subsequent neighbor lookups don't recompute distances. For the energy function, I'm computing $torusD2 on-the-fly for particle pairs, which is fine at O(1) per call, though memoizing it could eliminate redundant distance calculations across the 36 unique pairs in the N=9 system.
+
+The real question is whether memoization helps: particles move each step, so cached distances become stale quickly. Within a single step, $virtualPairEnergy calls $torusD2 through the cluster builder, but with memoized neighbor lists, the cluster builder avoids direct distance calls—it uses precomputed neighbors instead. The energy function itself still computes distances on-the-fly. I see that for each neighbor q, we're computing the pair energy three times—once for the original position p, once for pPost, and once for pRev—to get the distances p-q, pPost-q, and pRev-q. The issue is that $virtualPairEnergy recalculates $torusD2 internally even though we already know q came from the memoized neighbors within $maxD2, making that distance check redundant.
+
+But there's a catch: q might appear in the neighbor shell of pPost or pRev without being in p's shell, or vice versa, which means some of these distances could exceed $maxD2 and we can't skip the distance computation entirely.
+
+The $virtualPairEnergy function handles this with its d2 <= $maxD2 check, so those $torusD2 calls are necessary even though they're just O(1) arithmetic operations.
+
+I think I've worked through the logic enough. Now I need to implement the actual changes: updating the neighbor and bond construction to use displacement-based logic for finite $maxD2, switching the energy computation to O(N²) pair iteration, and adding the maxD2= option to the animation script.
+
+Writing the code... the infinite case works for small lattices, but for finite $maxD2 I'm iterating over a square region of displacements, filtering candidates by actual distance—so for $maxD2=8 that's roughly 49 candidates to check, and for $maxD2=1 just 9. I'm noticing a potential issue though: the TrueQ[$maxD2 === Infinity] check handles when $maxD2 is the Infinity object, but I need to be careful about what happens if $maxD2 isn't defined at all.
+
+Actually, in vmmc_continuous.wl $maxD2 is always initialized to Infinity, so it's guaranteed to be defined. The real subtlety is that this check happens at memoization time—when $neighborsD2[s, nGrid] is first called, it evaluates the conditional and caches the result based only on (s, nGrid). If $maxD2 changes between calls, the memoized value from the old setting would persist, which is a problem that existed in the original code too.
+
+For the actual use cases though—animate.wls sets $maxD2 once before calling anything, and check.wls just uses the default Infinity—this memoization issue doesn't come up in practice. Now I'm looking at how $uniqueBondsExt is defined, which collects all unique undirected bonds with squared distances up to $maxD2, using the same conditional logic to either enumerate all bonds or use a spatial cutoff...
+
+Generating bond enumeration... Defining the energy function...
+
+The energy function iterates through all pairs of occupied sites, computing their distance on the torus and summing coupling contributions for pairs within the cutoff distance. This is O(N²) in the number of particles, but much faster than the original approach since it only considers occupied sites rather than checking all grid positions. For the animate script, I need to add a maxD2 option parameter.
+
+Now I'm wondering whether $uniqueBondsExt is still needed elsewhere in the code, since the new energy calculation doesn't rely on it. I'm realizing that $uniqueBondsExt becomes dead code once I switch the energy function to the particle-pair approach, so I'll keep its definition for potential future use but remove the call from energy itself.
+
+Now I need to examine the actual code sections to make the precise changes, starting with reviewing the neighbor and bond utility definitions. I'm realizing I need to be careful about how these changes interact with the rest of the system. The $uniqueBondsExt variable is referenced in the energy calculation, but if I'm switching to a particle-pair approach, I won't need it anymore. Let me verify this won't break the checker—it uses energy symbolically on small lattices, so the computational cost should still be manageable. Since the new energy function bypasses $uniqueBondsExt entirely, the change should be safe across the board. Now I'll write out the targeted edits to make these modifications. Writing the optimized code...

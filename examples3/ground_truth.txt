@@ -1,0 +1,37 @@
+3. Building the ground-truth model and comparison metrics
+I recommend a staged approach, starting with what you already have.
+
+Stage 1 (immediate, no new simulation code): T_phys on small lattice systems.
+
+The checker already constructs the full symbolic transition matrix T_MC. For the same small lattice systems (3×3, 4×4), you can compute T_phys exactly. For the lattice LJ model, the physical single-particle dynamics is Glauber:
+
+
+k_phys(i→j) = (1/N) * (1/z) * 1/(1 + exp(βΔE))
+for each state pair (i, j) differing by one particle hop of one lattice unit. Here z = 4 (2D grid). Set diagonal entries so rows sum to 1. For cluster moves of size n, physically the rate should scale as 1/n^{1/2} (2D Stokes drag). T_phys is a fully enumerable matrix at the scale the checker uses.
+
+From T_phys and T_MC you can compute:
+
+Metric 1 — Eigenvalue spectrum ratio (timescale-independent, easy):
+
+Sort the non-trivial eigenvalues of T_MC and T_phys.
+Score: |λ_2^MC/λ_3^MC − λ_2^phys/λ_3^phys|.
+A perfect algorithm has the same ratios; a good algorithm has them close. This measures whether the algorithm's relaxation hierarchy matches the physical one.
+Metric 2 — Row-normalized KL divergence (the fidelity score F from viability.tex):
+
+
+F = -Σ_i π_i Σ_j T̃_ij^phys log(T̃_ij^phys / T̃_ij^MC)
+where T̃ means row-normalized. Higher (less negative) is better; F=0 is perfect. Hard failure if T_MC_ij = 0 for a transition with T̃_phys_ij > 0.
+
+Both of these can be computed in Mathematica for small systems in seconds, making them natural outputs of the checker after DB and ergodicity pass. This is a very practical next step — you effectively have everything needed to implement it already.
+
+Stage 2 (when you need larger-scale validation): BD simulation.
+
+Before committing to MPCD+MD, a simpler Brownian dynamics simulation (e.g., with ESPResSo's LangevinThermostat, no solvent, no HI) gives you a reference for single-particle diffusion and cluster kinetics without hydrodynamic interactions. This is easier to set up, directly comparable to the lattice MC (since neither the lattice nor the Langevin BD includes HI by default), and already well-validated.
+
+The comparison should focus on dimensionless observables:
+
+MSD exponent: ⟨r²(t)⟩ ∝ t^α (expect α → 1 at long times; subdiffusive behaviour at intermediate times from cluster trapping)
+Cluster size distribution P(n) vs. time
+Cluster diffusion D_n vs. n: this is where VMMC most visibly fails (should be ∝ n^{-1/2} in 2D, is ≈ const in VMMC)
+Pair correlation function g(r): tests thermodynamics (separate from kinetics)
+The parameter mapping from lattice to continuous BD: one MC step corresponds to a time δt_phys = σ²/(2D_1) * (MC acceptance rate), where D_1 is the single-particle diffusion coefficient from BD. You determine this mapping by requiring the long-time single-particle MSD to match.
