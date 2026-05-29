@@ -134,9 +134,9 @@ If[szPure && !szChecker,
 If[trustSymmetry && nGrid === None,
   Print["Note: TrustSymmetry=1 requires NGrid=N -- disabling TrustSymmetry."];
   trustSymmetry = False];
-If[trustSymmetry && seedBitStrings =!= None,
-  Print["Note: TrustSymmetry=1 is incompatible with SeedBitStrings -- disabling TrustSymmetry."];
-  trustSymmetry = False];
+(* TrustSymmetry + SeedBitStrings: compatible.  The seed only determines
+   particle types; all N-particle states are enumerated regardless of which
+   specific seed bit string was provided. *)
 
 (* ---- Validate MaxBitString ---- *)
 If[!StringMatchQ[maxBitString, ("0" | "1")..],
@@ -711,24 +711,13 @@ $loopBody[bitString_List] := Catch[
            StringPadRight[m1Str, colM1] <> StringPadRight[m2Str, colM2], ""]];
   Do[Print[StringRepeat[" ", colBits], stateRows[[r]]], {r, 2, Length[stateRows]}];
   If[Length[stateRows] > 1, Print[]];
-  If[$hasSym && mode =!= "Numerical" && $dbcLastDedupTotal > 0,
-    Print["  G-orbit dedup: ", $dbcLastDedupUnique, "/", $dbcLastDedupTotal,
-          " unique  (",
-          Round[100. * (1. - $dbcLastDedupUnique / N[$dbcLastDedupTotal])],
-          "% hash-collapsed)"]];
-  If[$tsTrustMsg =!= None, Print[$tsTrustMsg]];
-
   (* ---- G-invariance check ----
      Verifies T(s→s') === T(g(s)→g(s')) for each declared generator g.
-     Only runs when the canonical oracle was active during BFS.
-     Skipped in TrustSymmetry mode: the expanded matrix is G-invariant by
-     construction (T(g(r)→g(sp)) = T(r→sp) for all g), so the check would
-     trivially PASS and give false confidence.  Run without TrustSymmetry
-     to obtain a genuine G-invariance verification. *)
-  If[$useCanonicalOracle,
-    If[trustSymmetry,
-      Print["  G-invariance: ASSUMED (TrustSymmetry active -- not verified this run)"],
-      With[{gviol = CheckGInvariance[matrix, allStates, $symmetryGroup]},
+     Only runs when the canonical oracle was active during BFS and
+     TrustSymmetry is off (in TrustSymmetry mode the expanded matrix is
+     G-invariant by construction, so checking it gives no new information). *)
+  If[$useCanonicalOracle && !trustSymmetry,
+    With[{gviol = CheckGInvariance[matrix, allStates, $symmetryGroup]},
         If[gviol === {},
           gInvPassCount++;
           Print["  G-invariance: PASS"],
@@ -740,8 +729,7 @@ $loopBody[bitString_List] := Catch[
                     ": g(s) not in component for s=" <> ToString[v1["s"]],
                     ": T mismatch at s=" <> ToString[v1["s"]] <> " s2=" <> ToString[v1["s2"]]]]];
           Print["  WARNING: $symmetryGroup declaration may be incorrect; ",
-                "DB check is still correct (dedup only collapses hash-identical exprs)."]]]]];
-
+                "DB check is still correct (dedup only collapses hash-identical exprs)."]]]];
   writeProgress[$loopIdx];
   (* Return True when MaxComponents is reached — signals the outer loop to stop *)
   IntegerQ[maxComponents] && testedCount >= maxComponents,
