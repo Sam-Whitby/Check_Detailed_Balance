@@ -136,6 +136,7 @@ wolframscript -file check.wls <algorithm.wl> [options]
 | `SZOnly=1` | off | Skip FS even for suspected violations; `$dbcFS` cases still go to FS (requires `SZChecker=1`) |
 | `SZPure=1` | off | Skip FastChecker entirely; apply SZ directly to all expressions (fastest probabilistic mode; implies `SZOnly`) |
 | `PhysFidelity=1` | off | Compare T_MC to physical Glauber dynamics; adds M1 and M2 columns (see below) |
+| `TrustSymmetry=1` | off | BFS from G-orbit representatives only (~\|G\|-fold speedup). **Assumes** G-invariance and ergodicity — neither is verified. Requires `NGrid=N` and `$symmetryGroup` declaration. See [TrustSymmetry mode](#trustsymmetry-mode) below. |
 | `Verbose=True` | `False` | Per-state BFS progress |
 
 `NGrid` and `MaxComponents` together give an intuitive interface: `NGrid=2 MaxComponents=6` means "check the first 6 distinct 2×2 systems, stop there." Both options use lazy ID iteration internally so no large list is held in memory, even when the total state count for that grid size is in the millions.
@@ -215,6 +216,11 @@ wolframscript -file check.wls examples3/vmmc_lattice.wl \
 # SZPure: skip FastChecker entirely — fastest probabilistic mode, no FullSimplify
 wolframscript -file check.wls examples3/vmmc_lattice.wl \
   NGrid=3 MaxComponents=4 SZPure=1 Mode=Symbolic
+
+# TrustSymmetry: BFS from G-orbit representatives only (~|G|-fold BFS speedup)
+# ASSUMES G-invariance and ergodicity — run without TrustSymmetry periodically to verify
+wolframscript -file check.wls examples3/vmmc_lattice.wl \
+  NGrid=3 MaxComponents=1 SZPure=1 TrustSymmetry=1 Mode=Symbolic
 
 # Animate on a 20×20 grid (physLen=2, cutoff just past LJ minimum)
 wolframscript -file animate.wls examples3/vmmc_continuous.wl \
@@ -336,6 +342,76 @@ The G-invariance check is the definitive diagnostic: if it fails, the declared s
 
 ---
 
+## TrustSymmetry mode
+
+`TrustSymmetry=1` provides an additional ~|G|-fold speedup on top of the canonical-oracle dedup, by skipping full-component BFS entirely.
+
+### What it does
+
+Instead of BFS from a seed state discovering all component states dynamically, TrustSymmetry:
+
+1. **Enumerates** all N-particle states combinatorially (O(L!/(L-N)!) states, computed without any BFS).
+2. **Groups** states into G-orbits by applying all |G| group permutations and taking the lexicographic minimum as the canonical representative.
+3. **BFS** from one representative per orbit only (~N/|G| states instead of N).
+4. **Expands** the partial T matrix to the full T matrix by G-action: T(g(r)→g(s')) = T(r→s') for all g∈G.
+5. Runs the standard DB check on the full expanded matrix.
+
+### Assumptions (NOT verified)
+
+TrustSymmetry assumes:
+
+1. **G-invariance**: T(s→s') = T(g(s)→g(s')) for all state pairs and all g∈G. If this fails, the expanded matrix is wrong and the DB check result is meaningless.
+2. **Ergodicity**: All N-particle states with the same label multiset form one connected component. If the algorithm is non-ergodic, unreachable states are silently included in the enumeration, marked as covered, and suppressed from future BFS — masking the ergodicity failure.
+
+Neither assumption is verified when TrustSymmetry is active. The G-invariance check and ergodicity check are skipped (the G-invariance check is labelled "ASSUMED"; the ergodicity check always passes by construction since the enumerated count equals the theoretical count).
+
+### Safe workflow
+
+```
+1. New algorithm or after any change:
+   Run WITHOUT TrustSymmetry to verify G-invariance and ergodicity.
+   If both PASS, proceed.
+
+2. Fast iterative development:
+   Use TrustSymmetry=1 for rapid DB checks.
+   A G-symmetry bug that passes TrustSymmetry will be caught at step 1.
+
+3. Before finalising results:
+   Run WITHOUT TrustSymmetry once more as a sanity check.
+```
+
+### Expected speedup
+
+| Grid | N | States | Orbit reps (|G|=72) | BFS speedup |
+|------|---|--------|---------------------|-------------|
+| 3×3  | 2 | 72     | 1–2                 | ~36–72×     |
+| 3×3  | 3 | 504    | 7                   | ~72×        |
+| 3×3  | 4 | 3024   | 42                  | ~72×        |
+| 5×5  | 3 | 13 800 | ~69–190             | ~72–200×    |
+
+Orbit computation (grouping states into orbits) takes O(N · |G| · L) time and is typically negligible vs BFS. For large N (e.g. 4 particles on 5×5: 303 600 states), orbit computation may take a few seconds but BFS time is reduced proportionally.
+
+### Limitations
+
+- Requires `NGrid=N` (grid size must be specified).
+- Incompatible with `SeedBitStrings` (disabled automatically with a warning).
+- Only meaningful when `$symmetryGroup` is declared and the canonical oracle is active.
+- Does not run G-invariance check (would trivially PASS by construction).
+- For non-ergodic algorithms, TrustSymmetry silently covers all N-particle states, suppressing any subsequent ergodicity failure for that particle count. Always verify ergodicity first.
+
+### Example output
+
+```
+TrustSymmetry: ENABLED — BFS from G-orbit reps only (~|G|-fold speedup)
+               WARNING: G-invariance and ergodicity are ASSUMED, NOT verified.
+               Run without TrustSymmetry periodically to verify both.
+...
+  TrustSymmetry: 7 orbit rep(s) / 504 states  (|G|=72, 72.0× BFS reduction)
+  G-invariance: ASSUMED (TrustSymmetry active — not verified this run)
+```
+
+---
+
 ## Checker trust model and known failure modes
 
 The checker is a formal verifier, but it operates on a *model* of the algorithm's randomness.  Understanding what it trusts and where it can fail is essential.
@@ -365,6 +441,8 @@ The checker is a formal verifier, but it operates on a *model* of the algorithm'
 | `MaxComponents` limit | Only the first N components are checked; broken components beyond that are missed. | Set `MaxComponents` appropriately; run with `Mode=Symbolic` first |
 | Hidden mutable global state | Algorithm caches results in DownValues across calls; BFS path for state A contaminates path for state B. | Write stateless algorithms; `CheckAlgorithmSafety` catches some patterns |
 | Distance-matrix degeneracies | Two distinct geometric configurations with identical pairwise distances produce the same canonical T expression; G-invariance check sees them as equal. Only relevant for multi-particle systems with near-regular arrangements. | Test multiple components; inspect with `FailFast=1` |
+| TrustSymmetry: hidden non-ergodicity | If the algorithm is non-ergodic (some N-particle states unreachable), TrustSymmetry enumerates and covers all N-particle states, suppressing the ergodicity FAIL. | Verify ergodicity once without TrustSymmetry before adopting TrustSymmetry mode |
+| TrustSymmetry: hidden G-invariance failure | If the algorithm is not G-invariant (e.g. direction-biased proposal), TrustSymmetry expands T incorrectly and may report a spurious DB PASS. | Verify G-invariance once without TrustSymmetry before adopting TrustSymmetry mode |
 | Self-symmetric states (stabilizers) | States invariant under some g (e.g. cluster at every corner of a 2×2 square) trivially pass T(s→s') = T(g(s)→g(s')). G-invariance check cannot distinguish "invariant because G-invariant" from "invariant because stabilizer". | No false negative: stabilizer states correctly contribute zero violations |
 | SZChecker false-zero (probabilistic) | With k=30 random evaluations and random range ±p/q, p,q∈[1,50], a non-zero degree-d coupling polynomial evaluates to zero at all k points with probability ≤ (d/50)³⁰. For d≤20: ≤ 10⁻¹². | Increase `SZRepeats` for extremely high assurance; default k=30 is sufficient for all practical purposes |
 | SZPure false-zero (probabilistic) | Same as SZChecker above, applied to every expression. The transcendental abstraction (`$dbcAbstractTrans`) handles Erf/Erfc/Bessel coefficients exactly, so there is no additional risk from those terms. Only the pure polynomial coupling part is probabilistic. | Same mitigation; `SZPure` routes `$dbcFS` (structurally anomalous) expressions to FullSimplify as final safety net |

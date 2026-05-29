@@ -102,6 +102,9 @@ seedBitStrings  = None;    (* SeedBitStrings=X,Y: test specific bit strings *)
 physFidelity    = False;   (* PhysFidelity=1: compare T_MC to T_phys (Glauber) *)
 maxComponents   = Infinity; (* MaxComponents=N: stop after N distinct components *)
 nGrid           = None;    (* NGrid=N: only test N×N grid states *)
+trustSymmetry   = False;   (* TrustSymmetry=1: BFS from G-orbit reps only; ~|G|-fold speedup.
+                               ASSUMES G-invariance and full-N-particle ergodicity — NOT verified.
+                               Run without TrustSymmetry periodically to verify both. *)
 
 Do[
   If[StringMatchQ[opt, "MaxBitString="   ~~ __], maxBitString   = StringDrop[opt, 13]];
@@ -118,7 +121,8 @@ Do[
   If[StringMatchQ[opt, "FailFast="       ~~ __], failFast       = (StringDrop[opt,  9] =!= "0")];
   If[StringMatchQ[opt, "PhysFidelity="   ~~ __], physFidelity   = (StringDrop[opt, 12] =!= "0")];
   If[StringMatchQ[opt, "MaxComponents="  ~~ __], maxComponents  = ToExpression[StringDrop[opt, 14]]];
-  If[StringMatchQ[opt, "NGrid="          ~~ __], nGrid          = ToExpression[StringDrop[opt,  6]]],
+  If[StringMatchQ[opt, "NGrid="          ~~ __], nGrid          = ToExpression[StringDrop[opt,  6]]];
+  If[StringMatchQ[opt, "TrustSymmetry=" ~~ __], trustSymmetry  = (StringDrop[opt, 14] =!= "0")],
   {opt, kvArgs}];
 
 (* ---- Validate option combinations ---- *)
@@ -127,6 +131,12 @@ If[szPure && !fastChecker,
   fastChecker = True];
 If[szPure && !szChecker,
   szChecker = True];  (* SZPure implies SZChecker internally; keep consistent *)
+If[trustSymmetry && nGrid === None,
+  Print["Note: TrustSymmetry=1 requires NGrid=N — disabling TrustSymmetry."];
+  trustSymmetry = False];
+If[trustSymmetry && seedBitStrings =!= None,
+  Print["Note: TrustSymmetry=1 is incompatible with SeedBitStrings — disabling TrustSymmetry."];
+  trustSymmetry = False];
 
 (* ---- Validate MaxBitString ---- *)
 If[!StringMatchQ[maxBitString, ("0" | "1")..],
@@ -372,6 +382,10 @@ If[fastChecker && mode =!= "Numerical",
 If[failFast && mode =!= "Numerical",
   Print["FailFast:      Enabled (stop on first violation, print debug info)"]];
 If[physFidelity, Print["PhysFidelity:  Enabled (T_phys Glauber; M1=EigRatio, M2=KLFidelity)"]];
+If[trustSymmetry,
+  Print["TrustSymmetry: ENABLED — BFS from G-orbit reps only (~|G|-fold speedup)"];
+  Print["               WARNING: G-invariance and ergodicity are ASSUMED, NOT verified."];
+  Print["               Run without TrustSymmetry periodically to verify both."]];
 Print[StringRepeat["=", totalCols]];
 Print[];
 
@@ -469,25 +483,79 @@ $loopBody[bitString_List] := Catch[
                DisplayState[state], ToString[state]];
 
   (* ---- BFS: discover connected component ---- *)
-  treeData = BuildTreeAT[state, $bfsAlg,
-               "MaxBitDepth" -> maxBitDepth,
-               "TimeLimit"   -> 120.,
-               "Verbose"     -> verbose];
+  If[trustSymmetry && $useCanonicalOracle,
 
-  If[MatchQ[treeData, $dbc$cantHandle[_]],
-    clearProgress[];
-    With[{eRows = StringSplit[stateStr, "|"]},
-      Print[StringPadRight[bitsStr, colBits], StringPadRight[eRows[[1]], colState],
-            StringPadRight["?", colN], "ERROR: ", treeData[[1]]];
-      Do[Print[StringRepeat[" ", colBits], eRows[[r]]], {r, 2, Length[eRows]}]];
-    writeProgress[$loopIdx];
-    testedCount++; Throw[Null, $dbcSkip]];
+    (* ---- TrustSymmetry orbit path ----------------------------------------
+       Enumerate all N-particle states from seed, group into G-orbits, BFS
+       from orbit representatives only (~N/|G| states), then expand T by
+       G-action.  ASSUMES: the algorithm is G-invariant and all N-particle
+       states with the same label multiset form one connected component.
+       Neither assumption is verified here.  Run without TrustSymmetry
+       periodically to check G-invariance (via CheckGInvariance) and ergodicity. *)
+    Module[{allPerms, reps, repOfState, repToOrbitMap,
+            repLeavesList, repLeavesAssoc, nRep, nG, speedup, errorIdx},
+      allStates = $dbcEnumerateNParticleStates[state, nGrid];
+      nStates   = Length[allStates];
+      allPerms  = $dbcAllGroupPerms[nGrid, $symmetryGroup];
+      nG        = Length[allPerms];
+      {reps, repOfState, repToOrbitMap} =
+        $dbcComputeOrbits[allStates, allPerms, nGrid];
+      nRep    = Length[reps];
+      speedup = If[nRep > 0, N[nStates / nRep], 1.];
 
-  allStates = Sort @ Keys[treeData];
-  matrix    = TreeATToMatrix[treeData];
-  nStates   = Length[allStates];
-  coveredAssoc = Join[coveredAssoc, Association[# -> True & /@ allStates]];
-  testedCount++;
+      (* Parallel BFS from orbit representatives only.
+         Same partitioning strategy as BuildTreeAT: split reps across kernels. *)
+      With[{a = $bfsAlg, md = maxBitDepth, tl = 120., ng = nGrid},
+        repLeavesList = If[$nKernels > 0 && nRep > 1,
+          Flatten[
+            ParallelMap[
+              Function[chunk, Map[$dbcBuildStateLeaves[#, a, md, tl, ng] &, chunk]],
+              Partition[reps, UpTo[Ceiling[nRep / $nKernels]]]],
+            1],
+          Map[$dbcBuildStateLeaves[#, a, md, tl, ng] &, reps]]
+      ];
+
+      (* Surface any BFS analysis errors *)
+      errorIdx = SelectFirst[Range[nRep],
+                   MatchQ[repLeavesList[[#]], $dbc$cantHandle[_]] &, None];
+      If[errorIdx =!= None,
+        clearProgress[];
+        With[{eRows = StringSplit[stateStr, "|"]},
+          Print[StringPadRight[bitsStr, colBits], StringPadRight[eRows[[1]], colState],
+                StringPadRight["?", colN], "ERROR: ", repLeavesList[[errorIdx]][[1]]];
+          Do[Print[StringRepeat[" ", colBits], eRows[[r]]], {r, 2, Length[eRows]}]];
+        writeProgress[$loopIdx];
+        testedCount++;
+        Throw[Null, $dbcSkip]];
+
+      repLeavesAssoc = AssociationThread[reps -> repLeavesList];
+      matrix = $dbcExpandOrbitsToMatrix[repLeavesAssoc, repToOrbitMap, nGrid];
+      coveredAssoc = Join[coveredAssoc, Association[# -> True & /@ allStates]];
+      testedCount++;
+      Print["  TrustSymmetry: ", nRep, " orbit rep(s) / ", nStates,
+            " states  (|G|=", nG, ", ", Round[speedup, 0.1], "\[Times] BFS reduction)"]],
+
+    (* ---- Normal BFS path ---- *)
+    treeData = BuildTreeAT[state, $bfsAlg,
+                 "MaxBitDepth" -> maxBitDepth,
+                 "TimeLimit"   -> 120.,
+                 "Verbose"     -> verbose];
+
+    If[MatchQ[treeData, $dbc$cantHandle[_]],
+      clearProgress[];
+      With[{eRows = StringSplit[stateStr, "|"]},
+        Print[StringPadRight[bitsStr, colBits], StringPadRight[eRows[[1]], colState],
+              StringPadRight["?", colN], "ERROR: ", treeData[[1]]];
+        Do[Print[StringRepeat[" ", colBits], eRows[[r]]], {r, 2, Length[eRows]}]];
+      writeProgress[$loopIdx];
+      testedCount++; Throw[Null, $dbcSkip]];
+
+    allStates = Sort @ Keys[treeData];
+    matrix    = TreeATToMatrix[treeData];
+    nStates   = Length[allStates];
+    coveredAssoc = Join[coveredAssoc, Association[# -> True & /@ allStates]];
+    testedCount++
+  ];
 
   (* ---- Ergodicity check ---- *)
   ergoResult = CheckErgodicity[allStates];
@@ -502,7 +570,9 @@ $loopBody[bitString_List] := Catch[
      "couplings" / "eps" — symbolic atoms for FullSimplify assumptions.
      "numericParams"     — scalar symbols for the numerical MCMC Block. *)
   If[$hasDynParams,
-    dynP            = DynamicSymParams[allStates];
+    (* In TrustSymmetry mode allStates may contain O(L!/(L-N)!) states — pass only
+       the seed state since all states share the same particle type multiset. *)
+    dynP            = DynamicSymParams[If[trustSymmetry, {state}, allStates]];
     dynVars         = Join[Lookup[dynP, "eps", {}], Lookup[dynP, "couplings", {}]];
     dynNumVars      = Lookup[dynP, "numericParams", dynVars];
     compSymVars     = Union[$staticSymVars, dynVars];
@@ -647,24 +717,27 @@ $loopBody[bitString_List] := Catch[
 
   (* ---- G-invariance check ----
      Verifies T(s→s') === T(g(s)→g(s')) for each declared generator g.
-     Only runs when the canonical oracle was active during BFS (i.e. the
-     algorithm uses $vmmcCandidates).  Syntactic === comparison is valid
-     because canonical ordering makes G-related pairs produce identical
-     expressions; no FullSimplify is needed. *)
+     Only runs when the canonical oracle was active during BFS.
+     Skipped in TrustSymmetry mode: the expanded matrix is G-invariant by
+     construction (T(g(r)→g(sp)) = T(r→sp) for all g), so the check would
+     trivially PASS and give false confidence.  Run without TrustSymmetry
+     to obtain a genuine G-invariance verification. *)
   If[$useCanonicalOracle,
-    With[{gviol = CheckGInvariance[matrix, allStates, $symmetryGroup]},
-      If[gviol === {},
-        gInvPassCount++;
-        Print["  G-invariance: PASS"],
-        gInvFailCount++;
-        With[{v1 = gviol[[1]]},
-          Print["  G-invariance: FAIL  (", Length[gviol], " generator(s) violated)",
-                "  — ", v1["gen"],
-                If[v1["issue"] === "orbit-escapes-component",
-                  ": g(s) not in component for s=" <> ToString[v1["s"]],
-                  ": T mismatch at s=" <> ToString[v1["s"]] <> " s2=" <> ToString[v1["s2"]]]]];
-        Print["  WARNING: $symmetryGroup declaration may be incorrect; ",
-              "DB check is still correct (dedup only collapses hash-identical exprs)."]]]];
+    If[trustSymmetry,
+      Print["  G-invariance: ASSUMED (TrustSymmetry active — not verified this run)"],
+      With[{gviol = CheckGInvariance[matrix, allStates, $symmetryGroup]},
+        If[gviol === {},
+          gInvPassCount++;
+          Print["  G-invariance: PASS"],
+          gInvFailCount++;
+          With[{v1 = gviol[[1]]},
+            Print["  G-invariance: FAIL  (", Length[gviol], " generator(s) violated)",
+                  "  — ", v1["gen"],
+                  If[v1["issue"] === "orbit-escapes-component",
+                    ": g(s) not in component for s=" <> ToString[v1["s"]],
+                    ": T mismatch at s=" <> ToString[v1["s"]] <> " s2=" <> ToString[v1["s2"]]]]];
+          Print["  WARNING: $symmetryGroup declaration may be incorrect; ",
+                "DB check is still correct (dedup only collapses hash-identical exprs)."]]]]];
 
   writeProgress[$loopIdx];
   (* Return True when MaxComponents is reached — signals the outer loop to stop *)

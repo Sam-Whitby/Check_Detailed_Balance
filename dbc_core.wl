@@ -1867,6 +1867,212 @@ CheckGInvariance[matrix_Association, allStates_List, symGroup_List] :=
 
 
 (* ================================================================
+   TRUST-SYMMETRY ORBIT SPEEDUP
+   ================================================================
+   When TrustSymmetry=1 is declared, the checker skips full-component
+   BFS and instead:
+     1. Enumerates all N-particle states for the given nGrid from the
+        bijective encoding (no BFS needed — O(N) combinatorial).
+     2. Groups states into G-orbits (O(N·|G|) permutation applications).
+     3. Runs BFS ($dbcBuildStateLeaves) from ONE orbit representative
+        per orbit — ~N/|G| states instead of N.
+     4. Expands the partial T matrix to the full T matrix by applying
+        each G-element: T(g(rep)→g(sp)) = T(rep→sp) for all g∈G.
+     5. Runs the standard DB check on the full expanded T matrix.
+
+   CORRECTNESS GUARANTEE
+   If the algorithm is truly G-invariant (T(s→s') = T(g(s)→g(s')) for
+   all g∈G), then the expanded T equals the full T, and the DB check
+   is identical to the full check.  G-invariance is ASSUMED in
+   TrustSymmetry mode and NOT verified.
+
+   SAFETY MODEL
+   Use TrustSymmetry for fast iterative development after at least one
+   full run (without TrustSymmetry) has confirmed:
+     (a) G-invariance PASS, and
+     (b) Ergodicity PASS (component = full N-particle space).
+   Run the full check again whenever the algorithm changes, or
+   periodically as a sanity check.  A G-symmetry bug (e.g. a direction-
+   biased proposal) that survives the TrustSymmetry check will be caught
+   by the next full run's G-invariance check.
+
+   DOES NOT APPLY when:
+   - $symmetryGroup is not declared
+   - The canonical oracle ($vmmcCandidates) is not used
+   - The algorithm has external fields (field-broken symmetry)
+   - The component is not the full N-particle state space (non-ergodic)
+   ================================================================ *)
+
+(* ----------------------------------------------------------------
+   D4 action on (row, col) for an nGrid×nGrid torus.
+   All 8 elements indexed 1..8 (identity + 3 rotations + 4 reflections).
+   1-indexed coordinates: row ∈ [1,nGrid], col ∈ [1,nGrid].
+   ---------------------------------------------------------------- *)
+$dbcD4RC[1, r_, c_, n_] := {r, c}              (* identity *)
+$dbcD4RC[2, r_, c_, n_] := {c, n+1-r}          (* rot 90° CW *)
+$dbcD4RC[3, r_, c_, n_] := {n+1-r, n+1-c}      (* rot 180° *)
+$dbcD4RC[4, r_, c_, n_] := {n+1-c, r}          (* rot 270° CW *)
+$dbcD4RC[5, r_, c_, n_] := {r, n+1-c}          (* reflect LR *)
+$dbcD4RC[6, r_, c_, n_] := {n+1-r, c}          (* reflect UD *)
+$dbcD4RC[7, r_, c_, n_] := {c, r}              (* reflect main diag *)
+$dbcD4RC[8, r_, c_, n_] := {n+1-c, n+1-r}      (* reflect anti-diag *)
+
+(* ---- Precompute one group-element permutation as a site-index list.
+   perm[[p]] = new site for site p under (rotIdx, dr, dc).
+   rotIdx ∈ 1..8: D4 rotation/reflection.
+   (dr,dc): translation applied AFTER rotation, 0-indexed modulo nGrid. ---- *)
+$dbcMakeGPerm[rotIdx_Integer, dr_Integer, dc_Integer, nGrid_Integer] :=
+  Table[
+    With[{row = Ceiling[p/nGrid], col = Mod[p-1, nGrid]+1,
+          rc2 = $dbcD4RC[rotIdx, Ceiling[p/nGrid], Mod[p-1, nGrid]+1, nGrid]},
+      (Mod[rc2[[1]]-1+dr, nGrid])*nGrid + Mod[rc2[[2]]-1+dc, nGrid] + 1],
+    {p, nGrid^2}]
+
+(* ---- Apply a precomputed permutation to a state vector.
+   perm: list of length nGrid^2, perm[[p]] = destination site for site p.
+   Preserves particle labels (types). ---- *)
+$dbcApplyGPerm[perm_List, state_List] :=
+  Module[{new = ConstantArray[0, Length[state]]},
+    Do[If[state[[p]] > 0, new[[perm[[p]]]] = state[[p]]], {p, Length[state]}];
+    new]
+
+(* ---- Generate all |G| group-element permutations for symGroup.
+   symGroup: subset of {"translation", "D4"}.
+   Returns a list of nGrid^2-element permutation lists.
+   |G| = 8·nGrid² for {"translation","D4"},  8 for {"D4"} only,
+         nGrid² for {"translation"} only,  1 for {} (identity). ---- *)
+$dbcAllGroupPerms[nGrid_Integer, symGroup_List] :=
+  Module[{rotIdxs, drDcs},
+    rotIdxs = If[MemberQ[symGroup, "D4"], Range[8], {1}];
+    drDcs   = If[MemberQ[symGroup, "translation"],
+      Flatten[Table[{dr, dc}, {dr, 0, nGrid-1}, {dc, 0, nGrid-1}], 1],
+      {{0, 0}}];
+    Flatten[
+      Table[$dbcMakeGPerm[ri, dr, dc, nGrid],
+            {ri, rotIdxs}, {{dr, dc}, drDcs}],
+      1]]
+
+(* ----------------------------------------------------------------
+   $dbcEnumerateNParticleStates
+   All N-particle states (particle labels 1..N on L=nGrid² sites)
+   derived from seedState's particle type multiset.
+   Uses Permutations — O(N!/(L-N)!) — for small N only.
+
+   Note: the checker encoding uses LABELED particles (particle k has
+   label k), so all L!/(L-N)! orderings are distinct states even for
+   physically identical particles.  This matches $decode exactly.
+
+   Assumes the full N-particle state space forms one connected component
+   (ergodic under the declared algorithm).  If the algorithm is non-
+   ergodic, TrustSymmetry will mark all enumerated states as covered,
+   silently suppressing further component checks.  Run the full check
+   (without TrustSymmetry) to verify ergodicity.
+   ---------------------------------------------------------------- *)
+$dbcEnumerateNParticleStates[seedState_List, nGrid_Integer] :=
+  Module[{L = nGrid^2, types},
+    If[Length[seedState] =!= L, Return[{}]];
+    types = Sort @ DeleteCases[seedState, 0];  (* ordered labels: {1,2,...,N} *)
+    If[types === {}, Return[{ConstantArray[0, L]}]];
+    Map[
+      Function[sites,  (* ordered selection of N distinct sites *)
+        Module[{s = ConstantArray[0, L]},
+          Do[s[[sites[[i]]]] = types[[i]], {i, Length[types]}]; s]],
+      Permutations[Range[L], {Length[types]}]]]
+
+(* ----------------------------------------------------------------
+   $dbcComputeOrbits
+   Groups allStates into G-orbits under allPerms.
+   Returns:
+     reps          : list of canonical representatives (one per orbit).
+     repOfState    : Association[state → rep].
+     repToOrbitMap : Association[rep → Association[s → perm]]
+                     where perm is a permutation with perm(rep) = s.
+                     (Equivalently: the G-element that maps rep → s.)
+
+   Canonical representative = lexicographic minimum over the orbit.
+   Orbits with stabilizers are handled correctly: only ONE permutation
+   is stored per orbit member (the first one found that maps rep→s),
+   so the expansion never double-counts.
+   ---------------------------------------------------------------- *)
+$dbcComputeOrbits[allStates_List, allPerms_List, nGrid_Integer] :=
+  Module[{stateSet, repOfState, reps, repToOrbitMap, images, minImg},
+    stateSet = Association[# -> True & /@ allStates];
+
+    (* For each state, canonical rep = lexicographic min image under all perms.
+       Sort[] on lists uses lexicographic order in Mathematica; Min[] would
+       return a scalar (element-wise min) which is wrong for state vectors. *)
+    repOfState = Association @ Map[
+      Function[s,
+        images = $dbcApplyGPerm[#, s] & /@ allPerms;
+        minImg = First[Sort[images]];
+        s -> minImg],
+      allStates];
+
+    reps = DeleteDuplicates @ Values[repOfState];
+
+    (* For each rep, map each orbit member s → the first perm with perm(rep)=s *)
+    repToOrbitMap = Association @ Map[
+      Function[rep,
+        Module[{orbitMap = <||>},
+          Do[
+            With[{s = $dbcApplyGPerm[p, rep]},
+              If[KeyExistsQ[stateSet, s] && !KeyExistsQ[orbitMap, s],
+                orbitMap[s] = p]],  (* perm p maps rep → s *)
+            {p, allPerms}];
+          rep -> orbitMap]],
+      reps];
+
+    {reps, repOfState, repToOrbitMap}]
+
+(* ----------------------------------------------------------------
+   $dbcExpandOrbitsToMatrix
+   Reconstruct the full T matrix from per-representative BFS leaves.
+
+   repLeaves : Association[rep → {leaf1, leaf2, ...}]
+               where each leaf = {bits, nextState, pathWeight}
+   repToOrbitMap : from $dbcComputeOrbits
+
+   For each orbit member s with rep-to-s permutation perm:
+     T(s → perm(sp)) = T(rep → sp)   for all rep→sp transitions.
+
+   SET semantics (not Lookup+Add): each (s, dest) pair is generated
+   exactly once across all reps and all orbit members, so direct
+   assignment is correct.  (Proof: s belongs to exactly one orbit;
+   the injection perm maps distinct sp to distinct perm(sp).)
+   ---------------------------------------------------------------- *)
+$dbcExpandOrbitsToMatrix[repLeaves_Association, repToOrbitMap_Association,
+                          nGrid_Integer] :=
+  Module[{fullMatrix = <||>, repMatrix, orbitMap, perm, sp, spNew},
+    Do[
+      (* Build T matrix for rep from its BFS leaves *)
+      repMatrix = <||>;
+      Do[
+        With[{ns = leaf[[2]], w = leaf[[3]]},
+          repMatrix[{repKey, ns}] =
+            Lookup[repMatrix, Key[{repKey, ns}], 0] + w],
+        {leaf, repLeaves[repKey]}];
+
+      orbitMap = repToOrbitMap[repKey];  (* s → perm, where perm(rep) = s *)
+
+      (* Expand: for each orbit member s, apply perm to all destinations.
+         T(s → perm(sp)) = T(rep → sp) for all rep→sp transitions.
+         SET semantics: each (s, dest) key is produced exactly once. *)
+      Do[
+        perm = orbitMap[sKey];  (* group element: maps rep → sKey *)
+        KeyValueMap[
+          Function[{repSp, tVal},
+            sp    = repSp[[2]];                     (* destination from rep *)
+            spNew = $dbcApplyGPerm[perm, sp];       (* g applied to dest *)
+            fullMatrix[{sKey, spNew}] = tVal],      (* T(sKey → spNew) = T(rep → sp) *)
+          repMatrix],
+        {sKey, Keys[orbitMap]}],
+
+      {repKey, Keys[repLeaves]}];
+
+    fullMatrix]
+
+
+(* ================================================================
    SECTION 3b – JSON EXPORT + PYTHON VISUALISATION
    ================================================================ *)
 
