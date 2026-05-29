@@ -367,7 +367,7 @@ The checker is a formal verifier, but it operates on a *model* of the algorithm'
 | Distance-matrix degeneracies | Two distinct geometric configurations with identical pairwise distances produce the same canonical T expression; G-invariance check sees them as equal. Only relevant for multi-particle systems with near-regular arrangements. | Test multiple components; inspect with `FailFast=1` |
 | Self-symmetric states (stabilizers) | States invariant under some g (e.g. cluster at every corner of a 2×2 square) trivially pass T(s→s') = T(g(s)→g(s')). G-invariance check cannot distinguish "invariant because G-invariant" from "invariant because stabilizer". | No false negative: stabilizer states correctly contribute zero violations |
 | SZChecker false-zero (probabilistic) | With k=30 random evaluations and random range ±p/q, p,q∈[1,50], a non-zero degree-d coupling polynomial evaluates to zero at all k points with probability ≤ (d/50)³⁰. For d≤20: ≤ 10⁻¹². | Increase `SZRepeats` for extremely high assurance; default k=30 is sufficient for all practical purposes |
-| SZPure false-zero (probabilistic) | Same as SZChecker above, applied to every expression (not just FastChecker fallbacks). The coupling polynomial structure is identical; there is no additional risk beyond SZChecker. | Same mitigation; `SZPure` also routes `$dbcFS` (transcendental) expressions to FullSimplify, so Erfc-containing algorithms are not affected |
+| SZPure false-zero (probabilistic) | Same as SZChecker above, applied to every expression. The transcendental abstraction (`$dbcAbstractTrans`) handles Erf/Erfc/Bessel coefficients exactly, so there is no additional risk from those terms. Only the pure polynomial coupling part is probabilistic. | Same mitigation; `SZPure` routes `$dbcFS` (structurally anomalous) expressions to FullSimplify as final safety net |
 
 ### Known false-positive risks (spurious failures)
 
@@ -390,13 +390,14 @@ All checkers share the same efficiency pipeline: trivial-zero filter → syntact
 
 The fastest probabilistic mode. Bypasses FastChecker's Piecewise case enumeration entirely and applies Schwartz-Zippel directly to every deduplicated DB expression:
 
-1. For each unique expression, substitute `k` random rationals for all coupling parameters; β remains symbolic.
-2. `$dbcIsExpZero` checks whether every Exp-basis coefficient vanishes exactly (microseconds, pure rational arithmetic).
-3. All `k` evaluations confirm zero → PASS. Any non-zero result → violation. If the expression structure is unexpected after substitution (`$dbcFS`) → fall back to FullSimplify for that expression only.
+1. For each unique expression, substitute `k` random rationals for all coupling parameters and abstract scalar parameters (e.g. step size σ); β remains symbolic.
+2. Abstract any transcendental function values (`Erf[concrete]`, `Erfc[concrete]`, Bessel functions, etc.) to fresh algebraic symbols — same argument gets the same symbol. This makes Erf/Erfc cancellations exact without FullSimplify.
+3. `$dbcIsExpZero` checks whether every Exp-basis coefficient (now a rational polynomial in the Erf symbols) vanishes exactly.
+4. All `k` evaluations confirm zero → PASS. Any non-zero result → violation. Unexpected structure → FullSimplify fallback.
 
 `SZPure=1` implies `FastChecker=1` and `SZOnly=1` (automatically enabled). Use `SZRepeats=N` to control `k` (default 30).
 
-**When to use.** SZPure is fastest for systems with many unique expressions per component where FastChecker's Piecewise enumeration is the bottleneck. For coupling-polynomial algorithms (VMMC with pairwise LJ/Yukawa), SZPure certifies zero in microseconds per expression. For algorithms with Gaussian/Erfc proposals, the transcendental coefficient terms trigger `$dbcFS` and fall back to FullSimplify automatically — SZPure still works correctly but does not accelerate those expressions.
+**When to use.** SZPure works for all algorithm types in this library, including Gaussian-proposal algorithms (`vmmc_continuous`). Transcendental abstraction handles Erf/Erfc coefficients without FullSimplify. For coupling-polynomial algorithms it is trivially fast; for Gaussian-proposal algorithms it is also fast because Mathematica's evaluator auto-applies `Erf[-x]→-Erf[x]` before the check, canonicalising all arguments so same-argument cancellations appear directly.
 
 **False-negative risk.** The probabilistic false-zero rate is ≤ (d/50)^k per expression (d = coupling polynomial degree). At d≤20, k=30: < 10⁻³⁸. Increase `SZRepeats` for mission-critical audits.
 
@@ -411,11 +412,26 @@ When FastChecker cannot decide an expression, SZChecker replaces the `FullSimpli
 
 **Correctness.** The expression is a rational polynomial in the coupling atoms times Exp[−β·r] factors; for a non-zero polynomial, the Schwartz-Zippel lemma guarantees that a random rational point is non-zero with probability ≥ 1−d/N, where d is the polynomial degree and N=50 is the random range. With k=30 independent evaluations the false-zero probability is ≤ (d/50)^30 ≤ 10⁻¹² per expression (d≤20), effectively zero.
 
-**When it helps.** SZChecker is fast when many unique expressions survive FastChecker — each evaluation costs ~1 ms (substitution + rational coefficient check) versus ~1–30 s for `FullSimplify`. For VMMC on a 3×3 grid (~60 unique post-FastChecker expressions), SZChecker adds negligible overhead; for larger grids where FullSimplify is the bottleneck, it provides the largest speedup.
+**Transcendental extension.** After coupling substitution, function arguments become concrete numerics. `$dbcAbstractTrans` replaces each unique `Erf[concrete]`, `Erfc[concrete]`, Bessel function value, etc. with a fresh algebraic symbol (same argument → same symbol). `$dbcIsExpZero` then treats the Erf symbols as free polynomial variables, making same-argument cancellations exact. Mathematica's built-in `Erf[-x]→-Erf[x]` identity fires at substitution time, so forward and backward Erf arguments are automatically canonicalised before abstraction — the checker never needs to know this identity explicitly.
+
+**When it helps.** SZChecker is fast when many unique expressions survive FastChecker — each evaluation costs ~1 ms (substitution + abstraction + rational coefficient check) versus ~1–30 s for `FullSimplify`. For VMMC on a 3×3 grid (~60 unique post-FastChecker expressions), SZChecker adds negligible overhead; for larger grids where FullSimplify is the bottleneck, it provides the largest speedup.
 
 **When it makes no difference.** If FastChecker resolves all expressions (common for small components), the fallback is never reached and SZChecker adds no cost.
 
-**Compatibility.** Requires `FastChecker=1`. The `SZRepeats=N` flag sets k (default 30). Expressions where SZ returns an inconclusive structure still fall back to `FullSimplify`, so coverage is never lost.
+**Compatibility.** Requires `FastChecker=1`. The `SZRepeats=N` flag sets k (default 30). Expressions where SZ returns `$dbcFS` still fall back to `FullSimplify`, so coverage is never lost.
+
+### What still requires FullSimplify
+
+After transcendental abstraction, `$dbcSZCheckOne` falls back to `FullSimplify` only when it returns `$dbcFS` — i.e., when `$dbcIsExpZero` cannot determine the structure. Remaining cases:
+
+| Situation | Why $dbcFS | Likelihood |
+|-----------|------------|------------|
+| Term with 2+ distinct `Exp[...]` factors after `$dbcMergeExp` | `$dbcSplitTerm` sees multiple Exp subexpressions and cannot split cleanly | Rare; would require an expression like `Exp[a]·Exp[b]` that `$dbcMergeExp` failed to merge. Not seen in practice. |
+| `Sin`/`Cos`/`Tan` of numeric argument in coefficient | Excluded from abstraction (algebraic relations between different argument values; sin²+cos²=1 etc.) | Not seen in any current algorithm. If needed, would require a dedicated trigonometric extension. |
+| Residual `Piecewise` after `PiecewiseExpand` | `$dbcSplitTerm` encounters Piecewise at the top level, finds Exp factors in both branches, returns `$dbcFS` | Should not occur when all coupling params and abstract params are substituted; only possible if a conditional depends on β symbolically in a way `PiecewiseExpand` cannot resolve. |
+| Custom transcendental not in the abstraction list | Any function not in `{Erf, Erfc, FresnelS/C, SinIntegral, CosIntegral, ExpIntegralEi, LogIntegral, BesselJ/Y/I/K, ExpIntegralE}` | Extend the list in `$dbcAbstractTrans` as needed. |
+
+In practice, all algorithms in `examples3/` now have zero `$dbcFS` fallbacks when using `SZChecker=1` or `SZPure=1`.
 
 ### FastChecker internals: Piecewise case feasibility
 

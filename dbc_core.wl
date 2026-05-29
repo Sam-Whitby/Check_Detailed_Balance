@@ -1305,6 +1305,7 @@ $dbcDistributeFastChecker[] := (
     $dbcSubstEqualities,
     $dbcCheckOneExpr,
     $szRandQ,
+    $dbcAbstractTrans,
     $dbcSZCheckOne])
 
 (* Distribute everything needed for parallel BFS: RunWithBitsAT, its
@@ -1364,14 +1365,50 @@ $dbcFastWorker[expr_, assm_, symParams_] :=
 $szRandQ[] := RandomChoice[{-1, 1}] * RandomInteger[{1, 50}] /
               RandomInteger[{1, 50}]
 
+(* ---- Abstract transcendental atoms to fresh symbols for SZ checking.
+   Called AFTER coupling substitution so every function argument is a
+   concrete numeric.  Replaces each unique f[concrete...] with a fresh
+   symbol — same argument → same symbol — so equal-argument cancellations
+   (e.g. Erf[r] - Erf[r] → x - x → 0) are certified exactly by
+   $dbcIsExpZero's polynomial coefficient check.
+
+   SOUND for the listed functions because:
+     (a) Mathematica's evaluator automatically applies standard identities
+         (Erf[-x]→-Erf[x], Erfc[-x]→2-Erfc[x]→handled via Erf, etc.)
+         BEFORE this function is called, so all arguments are already in
+         canonical positive form.
+     (b) The only way such an expression can be identically zero is if
+         same-argument terms cancel — no cross-argument algebraic identity
+         is needed for any physically realistic DB proof.
+
+   NOT applied to Sin/Cos/Tan: these satisfy sin²+cos²=1 and addition
+   formulae that relate DIFFERENT argument values algebraically.  Treating
+   Sin[r1] and Sin[r2] as independent when r2 = 2*r1 could cause spurious
+   violations.  They do not appear in any current algorithm.
+
+   NOT applied to Log/Sqrt: already handled correctly by Expand via exact
+   algebraic arithmetic (e.g. Log[a] + Log[b] = Log[a*b] is NOT needed
+   for DB proofs; coefficients of Log terms cancel as rational multiples). ---- *)
+$dbcAbstractTrans[expr_] := Module[
+  {atoms, k = 0, subs},
+  atoms = DeleteDuplicates @ Cases[expr,
+    (Erf | Erfc | FresnelS | FresnelC |
+     SinIntegral | CosIntegral | ExpIntegralEi | LogIntegral |
+     BesselJ | BesselY | BesselI | BesselK)[__?NumericQ] |
+    ExpIntegralE[_Integer, _?NumericQ],
+    Infinity];
+  If[atoms === {}, Return[expr]];
+  subs = Map[(# -> Symbol["$dbcTr$" <> ToString[++k]]) &, atoms];
+  expr /. subs]
+
 (* ---- Schwartz-Zippel check for one DB expression.
    expr       : raw DB expression (coupling atoms + β free)
    symParams  : list of coupling symbolic atoms to substitute
                 (must NOT include β — it stays symbolic)
-   k          : number of independent random evaluations
+   nReps      : number of independent random evaluations
 
    Returns:
-     True               all k evaluations certify zero (PASS)
+     True               all nReps evaluations certify zero (PASS)
      {False, sub, asgn} $dbcIsExpZero found a non-zero coefficient
                         at coupling assignment asgn (VIOLATION)
      $dbcFS             unexpected expression structure after
@@ -1383,6 +1420,7 @@ $dbcSZCheckOne[expr_, symParams_List, nReps_Integer] := Module[
   Do[
     assign = Map[# -> $szRandQ[] &, symParams];
     subst  = PiecewiseExpand[expr /. assign, \[Beta] > 0];
+    subst  = $dbcAbstractTrans[subst];   (* abstract Erf/Erfc/Bessel etc. to fresh symbols *)
     res    = $dbcIsExpZero[subst];
     Which[
       res === True,  Null,
